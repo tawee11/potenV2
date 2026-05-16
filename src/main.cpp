@@ -96,6 +96,46 @@ static const uint8_t  ADC_AVG_SAMPLES     = 4;
 static const uint32_t SWEEP_INTERVAL_MS   = 3000;
 
 // ======================================================
+// Auto-range policy for LMP91000 TIA
+// ======================================================
+// LMP91000 TIACN.TIA_GAIN code:
+// 0 = external RTIA, 1 = 2.75k, 2 = 3.5k, 3 = 7k,
+// 4 = 14k, 5 = 35k, 6 = 120k, 7 = 350k.
+// We keep RLOAD = 10 ohm, same as your original TIACN=0x14.
+#define ENABLE_AUTO_RANGE 1
+
+static const uint8_t LMP_RLOAD_BITS = 0x00;   // 10 ohm
+static const float ADC_ZERO_VOLTAGE = ADC_VREF * 0.5f; // REFCN INT_Z=50%, expected ~2.048V
+
+// Change gain only when the ADC output is too close to rail or too small.
+// Values are intentionally conservative to avoid gain hunting.
+static const float AUTO_RANGE_HIGH_ABS_V = 1.75f; // |ADC - 2.048| > 1.75V => lower gain
+static const float AUTO_RANGE_LOW_ABS_V  = 0.12f; // |ADC - 2.048| < 0.12V => higher gain
+static const uint8_t AUTO_RANGE_CONFIRM_COUNT = 3;
+static const uint32_t AUTO_RANGE_SETTLE_US = 5000;
+
+struct TiaRange {
+  uint8_t gainCode;
+  float rtiaOhm;
+  const char *name;
+};
+
+static const TiaRange tiaRanges[] = {
+  {1,   2750.0f, "2.75k"},
+  {2,   3500.0f, "3.5k"},
+  {3,   7000.0f, "7k"},
+  {4,  14000.0f, "14k"},
+  {5,  35000.0f, "35k"},
+  {6, 120000.0f, "120k"},
+  {7, 350000.0f, "350k"}
+};
+
+static const int8_t TIA_RANGE_COUNT = sizeof(tiaRanges) / sizeof(tiaRanges[0]);
+static int8_t currentTiaRangeIndex = 4; // default 35k, same as original TIACN=0x14
+static uint8_t autoRangeLowCount = 0;
+static uint8_t autoRangeHighCount = 0;
+
+// ======================================================
 // Shared Hardware SPI + LovyanGFX
 // ======================================================
 // ใช้ Hardware SPI bus เดียวกันสำหรับ TFT, DAC, ADC
@@ -305,6 +345,11 @@ struct MeasurementData {
   float dacExpectedVoltage;
   uint16_t adcRaw;
   float adcVoltage;
+  float adcDeltaVoltage;
+  float currentAmp;
+  float rtiaOhm;
+  uint8_t tiaCN;
+  char autoRangeAction; // '-' no change, 'U' gain up, 'D' gain down
   uint64_t timestamp_us;
   uint32_t period_us;
 };
@@ -336,6 +381,31 @@ void printHex8(const char *name, uint8_t value) {
   Serial.print(" = 0x");
   if (value < 0x10) Serial.print("0");
   Serial.println(value, HEX);
+}
+
+uint8_t makeTIACN(uint8_t gainCode) {
+  return (uint8_t)(((gainCode & 0x07) << 2) | (LMP_RLOAD_BITS & 0x03));
+}
+
+float getCurrentRtiaOhm() {
+  int8_t idx = currentTiaRangeIndex;
+  if (idx < 0) idx = 0;
+  if (idx >= TIA_RANGE_COUNT) idx = TIA_RANGE_COUNT - 1;
+  return tiaRanges[idx].rtiaOhm;
+}
+
+uint8_t getCurrentTIACN() {
+  int8_t idx = currentTiaRangeIndex;
+  if (idx < 0) idx = 0;
+  if (idx >= TIA_RANGE_COUNT) idx = TIA_RANGE_COUNT - 1;
+  return makeTIACN(tiaRanges[idx].gainCode);
+}
+
+const char *getCurrentRangeName() {
+  int8_t idx = currentTiaRangeIndex;
+  if (idx < 0) idx = 0;
+  if (idx >= TIA_RANGE_COUNT) idx = TIA_RANGE_COUNT - 1;
+  return tiaRanges[idx].name;
 }
 
 // ======================================================
@@ -420,9 +490,9 @@ bool lmpInitFromYourCode() {
 
   delay(1);
 
-  // TIACN = 0x14
-  // TIA_GAIN = 35k, RLOAD = 10 ohm ตาม code เดิม
-  if (!lmpWriteReg_safe(REG_TIACN, 0x14)) {
+  // Default TIACN = 35k, RLOAD = 10 ohm ตาม code เดิม
+  currentTiaRangeIndex = 4; // 35k
+  if (!lmpWriteReg_safe(REG_TIACN, getCurrentTIACN())) {
     Serial.println("Failed to write TIACN.");
     return false;
   }
@@ -600,6 +670,78 @@ uint16_t readAD7694Average_safe(uint8_t samples) {
 }
 
 // ======================================================
+// Auto-range helpers
+// ======================================================
+bool setTiaRangeIndex_safe(int8_t newIndex) {
+  if (newIndex < 0) newIndex = 0;
+  if (newIndex >= TIA_RANGE_COUNT) newIndex = TIA_RANGE_COUNT - 1;
+  if (newIndex == currentTiaRangeIndex) return true;
+
+  uint8_t newTIACN = makeTIACN(tiaRanges[newIndex].gainCode);
+
+  bool okUnlock = lmpWriteReg_safe(REG_LOCK, 0x00);
+  bool okWrite  = lmpWriteReg_safe(REG_TIACN, newTIACN);
+  bool okLock   = lmpWriteReg_safe(REG_LOCK, 0x01);
+
+  if (okUnlock && okWrite && okLock) {
+    currentTiaRangeIndex = newIndex;
+    delayMicroseconds(AUTO_RANGE_SETTLE_US);
+    return true;
+  }
+
+  Serial.println("ERR: auto range failed to write LMP91000 TIACN");
+  return false;
+}
+
+char autoRangeUpdateAndMaybeChange(float adcVoltage) {
+#if ENABLE_AUTO_RANGE
+  float absDelta = fabsf(adcVoltage - ADC_ZERO_VOLTAGE);
+
+  // Output too close to rail: lower gain immediately after confirmation.
+  if (absDelta > AUTO_RANGE_HIGH_ABS_V) {
+    autoRangeHighCount++;
+    autoRangeLowCount = 0;
+
+    if (autoRangeHighCount >= AUTO_RANGE_CONFIRM_COUNT && currentTiaRangeIndex > 0) {
+      autoRangeHighCount = 0;
+      if (setTiaRangeIndex_safe(currentTiaRangeIndex - 1)) {
+        return 'D'; // Down gain / lower RTIA
+      }
+    }
+    return '-';
+  }
+
+  // Output is very small around zero: increase gain after confirmation.
+  if (absDelta < AUTO_RANGE_LOW_ABS_V) {
+    autoRangeLowCount++;
+    autoRangeHighCount = 0;
+
+    if (autoRangeLowCount >= AUTO_RANGE_CONFIRM_COUNT && currentTiaRangeIndex < (TIA_RANGE_COUNT - 1)) {
+      autoRangeLowCount = 0;
+      if (setTiaRangeIndex_safe(currentTiaRangeIndex + 1)) {
+        return 'U'; // Up gain / higher RTIA
+      }
+    }
+    return '-';
+  }
+
+  autoRangeLowCount = 0;
+  autoRangeHighCount = 0;
+#endif
+  return '-';
+}
+
+void fillCurrentFields(MeasurementData &data) {
+  data.adcDeltaVoltage = data.adcVoltage - ADC_ZERO_VOLTAGE;
+  data.rtiaOhm = getCurrentRtiaOhm();
+  data.tiaCN = getCurrentTIACN();
+
+  // Polarity may depend on your electrochemical connection.
+  // For LMP91000 TIA output, this gives the measured transimpedance relation.
+  data.currentAmp = data.adcDeltaVoltage / data.rtiaOhm;
+}
+
+// ======================================================
 // Push measurement to queues
 // ======================================================
 void publishMeasurement(const MeasurementData &data) {
@@ -630,6 +772,7 @@ void measureOnePoint(float dacSetVoltage, SweepDirection direction, uint32_t &sa
   data.dacSetVoltage = dacSetVoltage;
   data.dacCode = voltageToDACCode(dacSetVoltage);
   data.dacExpectedVoltage = dacCodeToVoltage(data.dacCode);
+  data.autoRangeAction = '-';
 
   writeAD5680_safe(data.dacCode);
 
@@ -638,6 +781,18 @@ void measureOnePoint(float dacSetVoltage, SweepDirection direction, uint32_t &sa
 
   data.adcRaw = readAD7694Average_safe(ADC_AVG_SAMPLES);
   data.adcVoltage = adcRawToVoltage(data.adcRaw);
+
+  // Auto-range decision is made after the first read.
+  // If gain changes, re-read the same DAC point so the logged sample uses the new range.
+  char action = autoRangeUpdateAndMaybeChange(data.adcVoltage);
+  if (action != '-') {
+    data.autoRangeAction = action;
+    data.adcRaw = readAD7694Average_safe(ADC_AVG_SAMPLES);
+    data.adcVoltage = adcRawToVoltage(data.adcRaw);
+  }
+
+  fillCurrentFields(data);
+
   data.timestamp_us = esp_timer_get_time();
   data.period_us = (uint32_t)(data.timestamp_us - t0);
 
@@ -770,7 +925,7 @@ void drawMeasurement(const MeasurementData &data) {
   lcd.setTextColor(TFT_CYAN, TFT_BLACK);
   lcd.setTextSize(2);
 
-  lcd.fillRect(10, 80, 460, 190, TFT_BLACK);
+  lcd.fillRect(10, 80, 460, 230, TFT_BLACK);
 
   lcd.setCursor(10, 80);
   lcd.print("Dir: ");
@@ -795,6 +950,17 @@ void drawMeasurement(const MeasurementData &data) {
   lcd.println(" V");
 
   lcd.setCursor(10, 230);
+  lcd.print("RTIA: ");
+  lcd.print(data.rtiaOhm, 0);
+  lcd.print(" ohm ");
+  lcd.print(data.autoRangeAction);
+
+  lcd.setCursor(10, 260);
+  lcd.print("I: ");
+  lcd.print(data.currentAmp * 1000000.0f, 3);
+  lcd.println(" uA");
+
+  lcd.setCursor(10, 290);
   lcd.print("Period: ");
   lcd.print(data.period_us);
   lcd.println(" us");
@@ -816,6 +982,18 @@ void printMeasurementCsv(const MeasurementData &data) {
   Serial.print(data.adcRaw);
   Serial.print(',');
   Serial.print(data.adcVoltage, 6);
+  Serial.print(',');
+  Serial.print(data.adcDeltaVoltage, 6);
+  Serial.print(',');
+  Serial.print(data.currentAmp, 12);
+  Serial.print(',');
+  Serial.print(data.rtiaOhm, 0);
+  Serial.print(',');
+  Serial.print("0x");
+  if (data.tiaCN < 0x10) Serial.print("0");
+  Serial.print(data.tiaCN, HEX);
+  Serial.print(',');
+  Serial.print(data.autoRangeAction);
   Serial.print(',');
   Serial.print((unsigned long long)data.timestamp_us);
   Serial.print(',');
@@ -1189,14 +1367,43 @@ void printTouchOnce() {
 #endif
 }
 
+
+void resetAutoRangeToLowestForNewRun() {
+  // User requirement:
+  // Every Serial command 'r' must start from the lowest internal RTIA range.
+  // This makes each new run predictable, then auto-range can increase RTIA as needed.
+  if (!waitMeasurementIdle(1000)) {
+    Serial.println("Auto-range reset skipped: measurement busy timeout");
+    return;
+  }
+
+  autoRangeLowCount = 0;
+  autoRangeHighCount = 0;
+
+  if (setTiaRangeIndex_safe(4)) {
+    Serial.print("Auto-range start range reset to ");
+    Serial.print(getCurrentRangeName());
+    Serial.print(" RTIA=");
+    Serial.print(getCurrentRtiaOhm(), 0);
+    Serial.print(" TIACN=0x");
+    Serial.println(getCurrentTIACN(), HEX);
+  }
+}
+
 void handleSerialCommand(char c) {
   if (c == '\r' || c == '\n') return;
 
   if (c == 'r' || c == 'R') {
+    if (measurementEnabled) {
+      Serial.println("Measurement already running; send 's' first before starting a new 2.75k run");
+      return;
+    }
+
+    resetAutoRangeToLowestForNewRun();
     requestMeasurementRun();
     digitalWrite(LED_BUILTIN_PIN, LOW);
     refreshRunButtonFromOptionTask();
-    Serial.println("Measurement RUN");
+    Serial.println("Measurement RUN from RTIA 2.75k");
   }
   else if (c == 's' || c == 'S') {
     requestMeasurementStop();
@@ -1212,7 +1419,12 @@ void handleSerialCommand(char c) {
     }
   }
   else if (c == 'g' || c == 'G') {
-    setLMPRegisterOption(REG_TIACN, 0x14);
+    if (measurementEnabled) {
+      Serial.println("Set TIA range skipped: STOP measurement first");
+    } else {
+      setTiaRangeIndex_safe(4);
+      Serial.println("TIA range set to 35k");
+    }
   }
   else if (c == 'u' || c == 'U') {
     manualRefreshDisplay();
@@ -1238,6 +1450,14 @@ void handleSerialCommand(char c) {
     Serial.println(measurementPriorityIsHigh ? "true" : "false");
     Serial.print("loggerDropCount=");
     Serial.println(loggerDropCount);
+    Serial.print("autoRange=");
+    Serial.println(ENABLE_AUTO_RANGE ? "enabled" : "disabled");
+    Serial.print("TIA range=");
+    Serial.print(getCurrentRangeName());
+    Serial.print(" RTIA=");
+    Serial.print(getCurrentRtiaOhm(), 0);
+    Serial.print(" TIACN=0x");
+    Serial.println(getCurrentTIACN(), HEX);
     Serial.print("hasLastMeasurement=");
     Serial.println(hasLastMeasurement ? "true" : "false");
     Serial.print("ENABLE_TOUCH_CONTROL=");
@@ -1260,7 +1480,7 @@ void handleSerialCommand(char c) {
 void optionTask(void *pvParameters) {
   Serial.println("OptionTask started on Core " + String(xPortGetCoreID()) + " (low priority, Serial/logger/options)");
   Serial.println();
-  Serial.println("direction,DAC_set_V,DAC_code,DAC_expected_V,ADC_raw,ADC_V,timestamp_us,period_us");
+  Serial.println("direction,DAC_set_V,DAC_code,DAC_expected_V,ADC_raw,ADC_V,ADC_delta_V,current_A,RTIA_ohm,TIACN,AutoRange,timestamp_us,period_us");
 
   MeasurementData data;
   uint32_t lastI2CStatusMs = 0;
@@ -1416,6 +1636,12 @@ void setup() {
   }
 
   printLMPRegisters_safe();
+  Serial.print("Auto range: ");
+  Serial.println(ENABLE_AUTO_RANGE ? "ENABLED" : "DISABLED");
+  Serial.print("Initial TIA range: ");
+  Serial.print(getCurrentRangeName());
+  Serial.print(" RTIA=");
+  Serial.println(getCurrentRtiaOhm(), 0);
 
   // ------------------------------
   // DAC initial
@@ -1425,10 +1651,10 @@ void setup() {
 
   Serial.println();
   Serial.println("Commands:");
-  Serial.println("  r = run measurement");
+  Serial.println("  r = run measurement, reset RTIA to 2.75k first");
   Serial.println("  s = stop measurement");
   Serial.println("  p = print LMP91000 registers");
-  Serial.println("  g = example write TIACN 0x14");
+  Serial.println("  g = set TIA range back to 35k");
   Serial.println("  u = manual TFT refresh, STOP only");
   Serial.println("  t = touch status once");
   Serial.println("  w = raw XPT2046 touch values");
