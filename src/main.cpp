@@ -2,13 +2,23 @@
 #include <Wire.h>
 #include <SPI.h>
 #include <FS.h>
-#include <SPIFFS.h>
+#include <LittleFS.h>
+#include <Preferences.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#if __has_include(<esp_wpa2.h>)
+#include <esp_wpa2.h>
+#define POTENV2_HAS_WPA2_ENTERPRISE 1
+#else
+#define POTENV2_HAS_WPA2_ENTERPRISE 0
+#endif
 #define LGFX_USE_V1
 #include <LovyanGFX.hpp>
 #include "esp_timer.h"
 
 // ======================================================
-// PotenV2 Rev.2.0 Multitasking Example
+// smart-ec Multitasking Example
 // ESP32-S3 + AD5680 + AD7694 + LMP91000 + TFT ILI9488
 //
 // Core 1 : measurementTask, dynamic priority
@@ -171,11 +181,11 @@ public:
       auto cfg = _bus_instance.config();
       cfg.spi_host    = SPI2_HOST;
       cfg.spi_mode    = 0;
-      cfg.freq_write  = 40000000;       // Same as working touch test file
-      cfg.freq_read   = 16000000;
+      cfg.freq_write  = 20000000;       // Safer for shared SPI with TFT + Touch + DAC/ADC
+      cfg.freq_read   = 8000000;
       cfg.spi_3wire   = false;
       cfg.use_lock    = true;
-      cfg.dma_channel = SPI_DMA_CH_AUTO;
+      cfg.dma_channel = 0;              // Disable DMA first; safer when several devices share SPI2_HOST
 
       cfg.pin_sclk = SPI_SCK;
       cfg.pin_mosi = SPI_MOSI;
@@ -357,6 +367,31 @@ struct MeasurementData {
 // Latest measurement for manual TFT refresh.
 static MeasurementData lastMeasurement;
 volatile bool hasLastMeasurement = false;
+
+// Centralized TFT refresh requests.
+// Only optionTask executes the actual lcd.* drawing.
+// Touch/Serial/Web callbacks should request a refresh instead of drawing directly.
+volatile bool tftFullRefreshRequested = false;
+volatile bool tftRunButtonRefreshRequested = false;
+volatile bool tftDrawMeasurementRequested = false;
+
+void requestTftFullRefresh() {
+  tftFullRefreshRequested = true;
+  tftRunButtonRefreshRequested = true;
+  if (hasLastMeasurement) {
+    tftDrawMeasurementRequested = true;
+  }
+}
+
+void requestTftRunButtonRefresh() {
+  tftRunButtonRefreshRequested = true;
+}
+
+void requestTftMeasurementRefresh() {
+  if (hasLastMeasurement) {
+    tftDrawMeasurementRequested = true;
+  }
+}
 
 #if ENABLE_TFT_DISPLAY && ENABLE_TOUCH_CONTROL
 static uint16_t touchCalData[8] = {0};
@@ -889,27 +924,36 @@ void measurementTask(void *pvParameters) {
 
 #if ENABLE_TFT_DISPLAY
 void drawStaticScreen() {
+  // Must be called while holding spiMutex.
   deselectAllSPI();
+
+  lcd.startWrite();
+  lcd.setRotation(1);                 // Set rotation before clearing/drawing.
   lcd.fillScreen(TFT_BLACK);
-  lcd.setRotation(1);
   lcd.setTextDatum(TL_DATUM);
   lcd.setTextColor(TFT_WHITE, TFT_BLACK);
   lcd.setTextSize(2);
   lcd.setCursor(10, 10);
-  lcd.println("PotenV2 Multitask");
+  lcd.println("smart-ec");
 
   lcd.setTextSize(1);
   lcd.setCursor(10, 42);
   lcd.println("LovyanGFX + Shared HW SPI");
   lcd.setCursor(10, 58);
-  lcd.println("Core1: Measurement  Core0: Option");
+  lcd.println("Core1: Measurement  Core0: Option/UI");
 
   // Start/Stop button area
   lcd.drawRect(BTN_X, BTN_Y, BTN_W, BTN_H, TFT_WHITE);
+
+  lcd.endWrite();
+  deselectAllSPI();
 }
 
 void drawRunButton(bool running) {
+  // Must be called while holding spiMutex.
   deselectAllSPI();
+
+  lcd.startWrite();
   uint16_t bg = running ? TFT_RED : TFT_GREEN;
   lcd.fillRect(BTN_X + 2, BTN_Y + 2, BTN_W - 4, BTN_H - 4, bg);
   lcd.setTextColor(TFT_BLACK, bg);
@@ -917,10 +961,16 @@ void drawRunButton(bool running) {
   lcd.setTextDatum(MC_DATUM);
   lcd.drawString(running ? "STOP" : "RUN", BTN_X + BTN_W / 2, BTN_Y + BTN_H / 2);
   lcd.setTextDatum(TL_DATUM);
+  lcd.endWrite();
+
+  deselectAllSPI();
 }
 
 void drawMeasurement(const MeasurementData &data) {
+  // Must be called while holding spiMutex.
   deselectAllSPI();
+
+  lcd.startWrite();
   lcd.setTextDatum(TL_DATUM);
   lcd.setTextColor(TFT_CYAN, TFT_BLACK);
   lcd.setTextSize(2);
@@ -964,7 +1014,50 @@ void drawMeasurement(const MeasurementData &data) {
   lcd.print("Period: ");
   lcd.print(data.period_us);
   lcd.println(" us");
+
+  lcd.endWrite();
+  deselectAllSPI();
 }
+
+void serviceTftRefresh() {
+  // Must be called only from optionTask.
+  if (measurementBusy) return;
+
+  bool doFull = tftFullRefreshRequested;
+  bool doRun  = tftRunButtonRefreshRequested;
+  bool doMeas = tftDrawMeasurementRequested && hasLastMeasurement;
+
+  if (!doFull && !doRun && !doMeas) return;
+
+  if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+    return;
+  }
+
+  // Clear requests after we get the mutex, so a missed draw can be requested again.
+  tftFullRefreshRequested = false;
+  tftRunButtonRefreshRequested = false;
+  tftDrawMeasurementRequested = false;
+
+  deselectAllSPI();
+
+  if (doFull) {
+    drawStaticScreen();
+  }
+
+  if (doRun || doFull) {
+    drawRunButton(measurementEnabled);
+  }
+
+  if (doMeas) {
+    MeasurementData snapshot = lastMeasurement;
+    drawMeasurement(snapshot);
+  }
+
+  deselectAllSPI();
+  xSemaphoreGive(spiMutex);
+}
+#else
+void serviceTftRefresh() {}
 #endif
 
 // ======================================================
@@ -1044,19 +1137,8 @@ void manualRefreshDisplay() {
     return;
   }
 
-  if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(500)) != pdTRUE) {
-    Serial.println("TFT refresh failed: spiMutex timeout");
-    return;
-  }
-
-  drawRunButton(false);
-  if (hasLastMeasurement) {
-    drawMeasurement(lastMeasurement);
-  }
-
-  xSemaphoreGive(spiMutex);
-  vTaskDelay(pdMS_TO_TICKS(10));
-  Serial.println("TFT refreshed");
+  requestTftFullRefresh();
+  Serial.println("TFT refresh requested");
 }
 #else
 void manualRefreshDisplay() {
@@ -1066,10 +1148,7 @@ void manualRefreshDisplay() {
 
 void refreshRunButtonFromOptionTask() {
 #if ENABLE_TFT_DISPLAY
-  if (!spiMutex) return;
-  if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
-  drawRunButton(measurementEnabled);
-  xSemaphoreGive(spiMutex);
+  requestTftRunButtonRefresh();
 #endif
 }
 
@@ -1129,7 +1208,7 @@ void handleTouchControl() {
 }
 bool saveTouchCalibration(const uint16_t *data) {
 #if ENABLE_TFT_DISPLAY && ENABLE_TOUCH_CONTROL
-  File f = SPIFFS.open(CALIBRATION_FILE, "w");
+  File f = LittleFS.open(CALIBRATION_FILE, "w");
   if (!f) {
     Serial.println("Touch cal save failed: cannot open file");
     return false;
@@ -1153,12 +1232,12 @@ bool saveTouchCalibration(const uint16_t *data) {
 
 bool loadTouchCalibration() {
 #if ENABLE_TFT_DISPLAY && ENABLE_TOUCH_CONTROL
-  if (!SPIFFS.exists(CALIBRATION_FILE)) {
+  if (!LittleFS.exists(CALIBRATION_FILE)) {
     Serial.println("No touch calibration file found.");
     return false;
   }
 
-  File f = SPIFFS.open(CALIBRATION_FILE, "r");
+  File f = LittleFS.open(CALIBRATION_FILE, "r");
   if (!f) {
     Serial.println("Touch cal load failed: cannot open file");
     return false;
@@ -1197,8 +1276,8 @@ bool loadTouchCalibration() {
 
 void deleteTouchCalibration() {
 #if ENABLE_TFT_DISPLAY && ENABLE_TOUCH_CONTROL
-  if (SPIFFS.exists(CALIBRATION_FILE)) {
-    SPIFFS.remove(CALIBRATION_FILE);
+  if (LittleFS.exists(CALIBRATION_FILE)) {
+    LittleFS.remove(CALIBRATION_FILE);
     Serial.println("Touch calibration file deleted.");
   } else {
     Serial.println("No touch calibration file to delete.");
@@ -1477,13 +1556,732 @@ void handleSerialCommand(char c) {
   }
 }
 
+// WiFi Manager (runs from optionTask on Core 0)
+// ======================================================
+// Define these in platformio.ini build_flags or above this file if needed:
+//   -D DEFAULT_WIFI_SSID=\"YourSSID\"
+//   -D DEFAULT_WIFI_PASSWORD=\"YourPassword\"
+//   -D DEFAULT_WIFI_USER=\"\"              // non-empty = WPA2 Enterprise
+#ifndef DEFAULT_WIFI_SSID
+#define DEFAULT_WIFI_SSID ""
+#endif
+#ifndef DEFAULT_WIFI_PASSWORD
+#define DEFAULT_WIFI_PASSWORD ""
+#endif
+#ifndef DEFAULT_WIFI_USER
+#define DEFAULT_WIFI_USER ""
+#endif
+
+static const char *WIFI_NVS_NAMESPACE   = "smart_ec";
+static const char *WIFI_NVS_KEY         = "wifi_list_v1";          // WiFi credentials are stored in NVS, not in LittleFS
+static const char *WIFI_PORTAL_FILE     = "/wifi_index.html";      // put this file in PlatformIO data/ and upload LittleFS
+static const char *WIFI_AP_PASSWORD     = "12345678";
+static const uint8_t WIFI_MAX_CREDS     = 12;
+static const uint32_t WIFI_DEFAULT_TIMEOUT_MS = 6000;
+static const uint32_t WIFI_STORED_TIMEOUT_MS  = 4500;
+static const uint32_t WIFI_RETRY_PERIOD_MS    = 30000;
+static const uint16_t WIFI_SCAN_MS_PER_CH     = 120;  // active scan; all channels about 1.5-2.0s
+
+struct WifiCredential {
+  String ssid;
+  String pass;
+  String user;      // empty = WPA/WPA2 Personal, non-empty = WPA2 Enterprise username
+  bool enterprise = false;
+  int32_t channel = 0;
+  uint8_t bssid[6] = {0, 0, 0, 0, 0, 0};
+  bool hasBssid = false;
+  int32_t lastRssi = -999;
+};
+
+static WifiCredential wifiCreds[WIFI_MAX_CREDS];
+static uint8_t wifiCredCount = 0;
+static WebServer wifiServer(80);
+static DNSServer wifiDns;
+static bool wifiServerStarted = false;
+static bool wifiApMode = false;
+static bool wifiConnectRequested = false;
+static uint32_t wifiLastRetryMs = 0;
+static String wifiApSsid = "smart-ec-Setup";
+
+static String urlDecode(const String &src) {
+  String out;
+  out.reserve(src.length());
+  for (size_t i = 0; i < src.length(); i++) {
+    char c = src[i];
+    if (c == '+') {
+      out += ' ';
+    } else if (c == '%' && i + 2 < src.length()) {
+      char h1 = src[i + 1];
+      char h2 = src[i + 2];
+      auto hexVal = [](char x) -> int {
+        if (x >= '0' && x <= '9') return x - '0';
+        if (x >= 'A' && x <= 'F') return x - 'A' + 10;
+        if (x >= 'a' && x <= 'f') return x - 'a' + 10;
+        return -1;
+      };
+      int v1 = hexVal(h1);
+      int v2 = hexVal(h2);
+      if (v1 >= 0 && v2 >= 0) {
+        out += char((v1 << 4) | v2);
+        i += 2;
+      } else {
+        out += c;
+      }
+    } else {
+      out += c;
+    }
+  }
+  return out;
+}
+
+static String urlEncode(const String &src) {
+  const char *hex = "0123456789ABCDEF";
+  String out;
+  out.reserve(src.length() * 3);
+  for (size_t i = 0; i < src.length(); i++) {
+    uint8_t c = (uint8_t)src[i];
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+      out += char(c);
+    } else if (c == ' ') {
+      out += '+';
+    } else {
+      out += '%';
+      out += hex[c >> 4];
+      out += hex[c & 0x0F];
+    }
+  }
+  return out;
+}
+
+static bool parseBssid(const String &text, uint8_t out[6]) {
+  if (text.length() != 17) return false;
+  int values[6];
+  if (sscanf(text.c_str(), "%x:%x:%x:%x:%x:%x", &values[0], &values[1], &values[2], &values[3], &values[4], &values[5]) != 6) return false;
+  for (int i = 0; i < 6; i++) out[i] = (uint8_t)values[i];
+  return true;
+}
+
+static String bssidToString(const uint8_t bssid[6]) {
+  char buf[18];
+  snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
+  return String(buf);
+}
+
+static String htmlEscape(const String &s) {
+  String out;
+  out.reserve(s.length());
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (c == '&') out += F("&amp;");
+    else if (c == '<') out += F("&lt;");
+    else if (c == '>') out += F("&gt;");
+    else if (c == '"') out += F("&quot;");
+    else out += c;
+  }
+  return out;
+}
+
+
+static String jsonEscape(const String &s) {
+  String out;
+  out.reserve(s.length() + 8);
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (c == '\\') out += F("\\\\");
+    else if (c == '"') out += F("\\\"");
+    else if (c == '\n') out += F("\\n");
+    else if (c == '\r') out += F("\\r");
+    else if (c == '\t') out += F("\\t");
+    else out += c;
+  }
+  return out;
+}
+
+static String serializeWifiCredentials() {
+  String data;
+  data.reserve(1024);
+
+  for (uint8_t i = 0; i < wifiCredCount; i++) {
+    WifiCredential &c = wifiCreds[i];
+    data += urlEncode(c.ssid); data += '\t';
+    data += urlEncode(c.pass); data += '\t';
+    data += urlEncode(c.user); data += '\t';
+    data += String(c.enterprise ? 1 : 0); data += '\t';
+    data += String(c.channel); data += '\t';
+    data += c.hasBssid ? bssidToString(c.bssid) : String("00:00:00:00:00:00");
+    data += '\n';
+  }
+  return data;
+}
+
+static bool parseWifiCredentialsText(const String &data) {
+  wifiCredCount = 0;
+  int pos = 0;
+
+  while (pos < (int)data.length() && wifiCredCount < WIFI_MAX_CREDS) {
+    int nl = data.indexOf('\n', pos);
+    if (nl < 0) nl = data.length();
+
+    String line = data.substring(pos, nl);
+    pos = nl + 1;
+    line.trim();
+    if (line.length() == 0 || line[0] == '#') continue;
+
+    int p1 = line.indexOf('\t');
+    int p2 = line.indexOf('\t', p1 + 1);
+    int p3 = line.indexOf('\t', p2 + 1);
+    int p4 = line.indexOf('\t', p3 + 1);
+    int p5 = line.indexOf('\t', p4 + 1);
+    if (p1 < 0 || p2 < 0 || p3 < 0 || p4 < 0 || p5 < 0) continue;
+
+    WifiCredential &c = wifiCreds[wifiCredCount];
+    c.ssid = urlDecode(line.substring(0, p1));
+    c.pass = urlDecode(line.substring(p1 + 1, p2));
+    c.user = urlDecode(line.substring(p2 + 1, p3));
+    c.enterprise = line.substring(p3 + 1, p4).toInt() != 0;
+    c.channel = line.substring(p4 + 1, p5).toInt();
+    c.hasBssid = parseBssid(line.substring(p5 + 1), c.bssid);
+    c.lastRssi = -999;
+
+    if (c.ssid.length() > 0) wifiCredCount++;
+  }
+
+  return wifiCredCount > 0;
+}
+
+static bool loadWifiCredentials() {
+  Preferences prefs;
+  wifiCredCount = 0;
+
+  if (!prefs.begin(WIFI_NVS_NAMESPACE, true)) {
+    Serial.println("WiFi NVS open failed.");
+    return false;
+  }
+
+  String data = prefs.getString(WIFI_NVS_KEY, "");
+  prefs.end();
+
+  if (data.length() == 0) {
+    Serial.println("No WiFi credentials in NVS yet.");
+    return false;
+  }
+
+  bool ok = parseWifiCredentialsText(data);
+  Serial.print("Loaded WiFi credentials from NVS: ");
+  Serial.println(wifiCredCount);
+  return ok;
+}
+
+static bool saveWifiCredentials() {
+  Preferences prefs;
+  if (!prefs.begin(WIFI_NVS_NAMESPACE, false)) {
+    Serial.println("WiFi NVS write open failed.");
+    return false;
+  }
+
+  String data = serializeWifiCredentials();
+  size_t written = prefs.putString(WIFI_NVS_KEY, data);
+  prefs.end();
+
+  bool ok = written == data.length();
+  if (!ok) {
+    Serial.println("WiFi NVS write failed or truncated.");
+  }
+  return ok;
+}
+
+static void upsertWifiCredential(const WifiCredential &input) {
+  if (input.ssid.length() == 0) return;
+
+  for (uint8_t i = 0; i < wifiCredCount; i++) {
+    if (wifiCreds[i].ssid == input.ssid && wifiCreds[i].user == input.user) {
+      wifiCreds[i].pass = input.pass;
+      wifiCreds[i].enterprise = input.enterprise;
+      wifiCreds[i].channel = input.channel;
+      wifiCreds[i].hasBssid = input.hasBssid;
+      memcpy(wifiCreds[i].bssid, input.bssid, 6);
+      saveWifiCredentials();
+      return;
+    }
+  }
+
+  if (wifiCredCount < WIFI_MAX_CREDS) {
+    wifiCreds[wifiCredCount++] = input;
+  } else {
+    // If full, replace the last slot. This avoids dynamic allocation surprises.
+    wifiCreds[WIFI_MAX_CREDS - 1] = input;
+  }
+  saveWifiCredentials();
+}
+
+static void deleteWifiCredential(uint8_t index) {
+  if (index >= wifiCredCount) return;
+  for (uint8_t i = index; i + 1 < wifiCredCount; i++) wifiCreds[i] = wifiCreds[i + 1];
+  wifiCredCount--;
+  saveWifiCredentials();
+}
+
+static void configureEnterpriseWifi(const WifiCredential &c) {
+#if POTENV2_HAS_WPA2_ENTERPRISE
+  esp_wifi_sta_wpa2_ent_disable();
+  esp_wifi_sta_wpa2_ent_set_identity((uint8_t *)c.user.c_str(), c.user.length());
+  esp_wifi_sta_wpa2_ent_set_username((uint8_t *)c.user.c_str(), c.user.length());
+  esp_wifi_sta_wpa2_ent_set_password((uint8_t *)c.pass.c_str(), c.pass.length());
+  esp_wifi_sta_wpa2_ent_enable();
+#else
+  (void)c;
+  Serial.println("WPA2 Enterprise is not available in this ESP32 Arduino core build.");
+#endif
+}
+
+static bool connectWifiCredential(WifiCredential &c, uint32_t timeoutMs) {
+  if (c.ssid.length() == 0) return false;
+
+  Serial.print("WiFi connect: ");
+  Serial.print(c.ssid);
+  Serial.print(c.enterprise ? " (WPA2 Enterprise)" : " (WPA/WPA2 Personal)");
+  if (c.channel > 0) {
+    Serial.print(" ch=");
+    Serial.print(c.channel);
+  }
+  Serial.println();
+
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.disconnect(false, false);
+  delay(80);
+
+#if POTENV2_HAS_WPA2_ENTERPRISE
+  esp_wifi_sta_wpa2_ent_disable();
+#endif
+
+  if (c.enterprise || c.user.length() > 0) {
+    configureEnterpriseWifi(c);
+    WiFi.begin(c.ssid.c_str());
+  } else if (c.channel > 0 && c.hasBssid) {
+    WiFi.begin(c.ssid.c_str(), c.pass.c_str(), c.channel, c.bssid, true);
+  } else if (c.channel > 0) {
+    WiFi.begin(c.ssid.c_str(), c.pass.c_str(), c.channel);
+  } else {
+    WiFi.begin(c.ssid.c_str(), c.pass.c_str());
+  }
+
+  uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - start) < timeoutMs) {
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+
+  bool ok = (WiFi.status() == WL_CONNECTED);
+  if (ok) {
+    Serial.print("WiFi connected: ");
+    Serial.print(WiFi.SSID());
+    Serial.print(" IP=");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("WiFi connect failed.");
+    WiFi.disconnect(false, false);
+  }
+  return ok;
+}
+
+static bool connectDefaultWifiFirst() {
+  WifiCredential c;
+  c.ssid = String(DEFAULT_WIFI_SSID);
+  c.pass = String(DEFAULT_WIFI_PASSWORD);
+  c.user = String(DEFAULT_WIFI_USER);
+  c.enterprise = c.user.length() > 0;
+  if (c.ssid.length() == 0) return false;
+  Serial.println("Trying default WiFi first...");
+  return connectWifiCredential(c, WIFI_DEFAULT_TIMEOUT_MS);
+}
+
+static bool connectStoredWifiFast() {
+  loadWifiCredentials();
+  if (wifiCredCount == 0) return false;
+
+  Serial.println("Fast scan for stored SSIDs...");
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  int n = WiFi.scanNetworks(false, true, false, WIFI_SCAN_MS_PER_CH, 0);
+
+  int bestCred = -1;
+  int bestAp = -1;
+  int bestRssi = -999;
+
+  if (n > 0) {
+    for (int ap = 0; ap < n; ap++) {
+      String apSsid = WiFi.SSID(ap);
+      for (uint8_t i = 0; i < wifiCredCount; i++) {
+        if (wifiCreds[i].ssid == apSsid && WiFi.RSSI(ap) > bestRssi) {
+          bestRssi = WiFi.RSSI(ap);
+          bestCred = i;
+          bestAp = ap;
+        }
+      }
+    }
+  }
+
+  if (bestCred >= 0) {
+    wifiCreds[bestCred].channel = WiFi.channel(bestAp);
+    uint8_t *b = WiFi.BSSID(bestAp);
+    if (b) {
+      memcpy(wifiCreds[bestCred].bssid, b, 6);
+      wifiCreds[bestCred].hasBssid = true;
+    }
+    wifiCreds[bestCred].lastRssi = bestRssi;
+
+    WifiCredential selected = wifiCreds[bestCred];
+    WiFi.scanDelete();
+    if (connectWifiCredential(selected, WIFI_STORED_TIMEOUT_MS)) {
+      // Move successful credential to top and save updated BSSID/channel.
+      WifiCredential ok = selected;
+      for (int i = bestCred; i > 0; i--) wifiCreds[i] = wifiCreds[i - 1];
+      wifiCreds[0] = ok;
+      saveWifiCredentials();
+      return true;
+    }
+  } else {
+    WiFi.scanDelete();
+  }
+
+  // Fallback: try stored credentials with known channel/BSSID first, short timeout each.
+  for (uint8_t i = 0; i < wifiCredCount; i++) {
+    if (connectWifiCredential(wifiCreds[i], WIFI_STORED_TIMEOUT_MS)) {
+      WifiCredential ok = wifiCreds[i];
+      for (int j = i; j > 0; j--) wifiCreds[j] = wifiCreds[j - 1];
+      wifiCreds[0] = ok;
+      saveWifiCredentials();
+      return true;
+    }
+  }
+  return false;
+}
+
+static String wifiStatusHtml() {
+  String s;
+  if (WiFi.status() == WL_CONNECTED) {
+    s += F("<p class='ok'>Connected to <b>");
+    s += htmlEscape(WiFi.SSID());
+    s += F("</b><br>IP: ");
+    s += WiFi.localIP().toString();
+    s += F("</p>");
+  } else {
+    s += F("<p class='warn'>Not connected. AP portal is active.</p>");
+    s += F("<p>AP SSID: <b>");
+    s += htmlEscape(wifiApSsid);
+    s += F("</b>, password: <b>");
+    s += WIFI_AP_PASSWORD;
+    s += F("</b>, open <b>192.168.4.1</b></p>");
+  }
+  return s;
+}
+
+static String wifiPortalPage() {
+  loadWifiCredentials();
+  String html = F(
+    "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>smart-ec WiFi Manager</title>"
+    "<style>body{font-family:Arial;margin:20px;max-width:760px}input,button{font-size:16px;padding:8px;margin:4px 0;width:100%;box-sizing:border-box}button{cursor:pointer}.card{border:1px solid #ccc;border-radius:10px;padding:12px;margin:12px 0}.ok{color:#087d16}.warn{color:#b06000}.row{display:grid;grid-template-columns:1fr 100px;gap:8px;align-items:center}.small{font-size:13px;color:#666}</style>"
+    "</head><body><h2>smart-ec WiFi Manager</h2>");
+  html += wifiStatusHtml();
+  html += F(
+    "<div class='card'><h3>Add / Update WiFi</h3>"
+    "<form method='POST' action='/save'>"
+    "<label>SSID</label><input name='ssid' maxlength='32' required>"
+    "<label>Password</label><input name='pass' type='password' maxlength='64'>"
+    "<label><input type='checkbox' name='enterprise' value='1' style='width:auto'> WPA2 Enterprise</label><br>"
+    "<label>Enterprise Username / Identity</label><input name='user' maxlength='64' placeholder='Leave blank for normal WPA/WPA2'>"
+    "<button type='submit'>Save and connect</button></form></div>"
+    "<div class='card'><h3>Saved Networks</h3>");
+
+  if (wifiCredCount == 0) {
+    html += F("<p>No saved network.</p>");
+  } else {
+    for (uint8_t i = 0; i < wifiCredCount; i++) {
+      html += F("<div class='row'><div><b>");
+      html += htmlEscape(wifiCreds[i].ssid);
+      html += F("</b><div class='small'>");
+      html += wifiCreds[i].enterprise ? F("WPA2 Enterprise") : F("WPA/WPA2 Personal");
+      if (wifiCreds[i].channel > 0) {
+        html += F(" · ch ");
+        html += String(wifiCreds[i].channel);
+      }
+      html += F("</div></div><a href='/delete?i=");
+      html += String(i);
+      html += F("'><button type='button'>Delete</button></a></div>");
+    }
+  }
+
+  html += F(
+    "</div><div class='card'><h3>Tools</h3>"
+    "<a href='/scan'><button type='button'>Scan WiFi JSON</button></a>"
+    "<a href='/connect'><button type='button'>Try saved networks now</button></a>"
+    "<p class='small'>WiFi credentials are stored in NVS Preferences. The HTML portal is stored in LittleFS.</p>"
+    "</div></body></html>");
+  return html;
+}
+
+
+static void sendWifiPortalIndex() {
+  if (LittleFS.exists(WIFI_PORTAL_FILE)) {
+    File f = LittleFS.open(WIFI_PORTAL_FILE, FILE_READ);
+    if (f) {
+      wifiServer.streamFile(f, "text/html");
+      f.close();
+      return;
+    }
+  }
+
+  // Fallback page, useful when firmware is updated but filesystem was not uploaded yet.
+  String html = F("<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+                  "<title>smart-ec WiFi</title></head><body style='font-family:Arial;margin:22px'>"
+                  "<h2>smart-ec WiFi Manager</h2>"
+                  "<p><b>wifi_index.html not found in LittleFS.</b></p>"
+                  "<p>Upload the PlatformIO data folder to LittleFS, or use this simple form.</p>"
+                  "<form method='POST' action='/save'>"
+                  "SSID<br><input name='ssid' required maxlength='32'><br>"
+                  "Password<br><input name='pass' type='password' maxlength='64'><br>"
+                  "Enterprise user<br><input name='user' maxlength='64'><br>"
+                  "<label><input type='checkbox' name='enterprise' value='1'> WPA2 Enterprise</label><br><br>"
+                  "<button type='submit'>Save and connect</button></form>"
+                  "<p><a href='/api/status'>Status JSON</a> | <a href='/scan'>Scan JSON</a></p>"
+                  "</body></html>");
+  wifiServer.send(200, "text/html", html);
+}
+
+static String wifiStatusJson() {
+  String json = F("{");
+  json += F("\"connected\":");
+  json += (WiFi.status() == WL_CONNECTED) ? F("true") : F("false");
+  json += F(",\"sta_ssid\":\"");
+  json += jsonEscape(WiFi.status() == WL_CONNECTED ? WiFi.SSID() : String(""));
+  json += F("\",\"ip\":\"");
+  json += jsonEscape(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String(""));
+  json += F("\",\"ap_active\":");
+  json += wifiApMode ? F("true") : F("false");
+  json += F(",\"ap_ssid\":\"");
+  json += jsonEscape(wifiApSsid);
+  json += F("\",\"ap_password\":\"");
+  json += jsonEscape(WIFI_AP_PASSWORD);
+  json += F("\",\"credential_storage\":\"NVS Preferences\"");
+  json += F(",\"nvs_namespace\":\"");
+  json += jsonEscape(WIFI_NVS_NAMESPACE);
+  json += F("\",\"nvs_key\":\"");
+  json += jsonEscape(WIFI_NVS_KEY);
+  json += F("\",\"portal_file\":\"");
+  json += jsonEscape(WIFI_PORTAL_FILE);
+  json += F("\",\"saved_count\":");
+  json += String(wifiCredCount);
+  json += F("}");
+  return json;
+}
+
+static String wifiNetworksJson() {
+  loadWifiCredentials();
+  String json = F("{\"networks\":[");
+  for (uint8_t i = 0; i < wifiCredCount; i++) {
+    if (i) json += ',';
+    WifiCredential &c = wifiCreds[i];
+    json += F("{\"id\":");
+    json += String(i);
+    json += F(",\"ssid\":\"");
+    json += jsonEscape(c.ssid);
+    json += F("\",\"enterprise\":");
+    json += c.enterprise ? F("true") : F("false");
+    json += F(",\"user\":\"");
+    json += jsonEscape(c.user);
+    json += F("\",\"channel\":");
+    json += String(c.channel);
+    json += F(",\"has_bssid\":");
+    json += c.hasBssid ? F("true") : F("false");
+    json += F(",\"bssid\":\"");
+    json += c.hasBssid ? bssidToString(c.bssid) : String("");
+    json += F("\"}");
+  }
+  json += F("]}");
+  return json;
+}
+
+static void handleWifiSave() {
+  WifiCredential c;
+  c.ssid = wifiServer.arg("ssid");
+  c.pass = wifiServer.arg("pass");
+  c.user = wifiServer.arg("user");
+  c.ssid.trim();
+  c.user.trim();
+  c.enterprise = wifiServer.hasArg("enterprise") || wifiServer.arg("enterprise") == "1" || c.user.length() > 0;
+
+  if (c.ssid.length() == 0) {
+    wifiServer.send(400, "application/json", F("{\"ok\":false,\"message\":\"SSID is required\"}"));
+    return;
+  }
+
+  upsertWifiCredential(c);
+  wifiConnectRequested = true;
+  wifiServer.send(200, "application/json", F("{\"ok\":true,\"message\":\"Saved. Connecting...\"}"));
+}
+
+static void handleWifiDelete() {
+  int idx = -1;
+  if (wifiServer.hasArg("i")) idx = wifiServer.arg("i").toInt();
+  else if (wifiServer.hasArg("id")) idx = wifiServer.arg("id").toInt();
+
+  if (idx < 0 || idx >= wifiCredCount) {
+    wifiServer.send(400, "application/json", F("{\"ok\":false,\"message\":\"Invalid network id\"}"));
+    return;
+  }
+
+  deleteWifiCredential((uint8_t)idx);
+  wifiServer.send(200, "application/json", F("{\"ok\":true,\"message\":\"Deleted\"}"));
+}
+
+static String wifiScanJson() {
+  int n = WiFi.scanNetworks(false, true, false, WIFI_SCAN_MS_PER_CH, 0);
+  String json = F("{\"scan_result\":[");
+  for (int i = 0; i < n; i++) {
+    if (i) json += ',';
+    json += F("{\"ssid\":\"");
+    json += jsonEscape(WiFi.SSID(i));
+    json += F("\",\"rssi\":");
+    json += String(WiFi.RSSI(i));
+    json += F(",\"channel\":");
+    json += String(WiFi.channel(i));
+    json += F(",\"encryption\":");
+    json += String((int)WiFi.encryptionType(i));
+    json += F("}");
+  }
+  json += F("]}");
+  WiFi.scanDelete();
+  return json;
+}
+
+static void startWifiPortal() {
+  uint64_t mac = ESP.getEfuseMac();
+  char suffix[7];
+  snprintf(suffix, sizeof(suffix), "%06X", (uint32_t)(mac & 0xFFFFFF));
+  wifiApSsid = String("smart-ec-Setup-") + suffix;
+
+  // If the web server routes were already registered earlier, only re-enable the AP radio.
+  // This lets the setup portal come back after STA disconnects without registering routes twice.
+  if (wifiServerStarted) {
+    if (!wifiApMode) {
+      WiFi.mode(WIFI_AP_STA);
+      WiFi.setSleep(false);
+      bool apOK = (strlen(WIFI_AP_PASSWORD) >= 8) ? WiFi.softAP(wifiApSsid.c_str(), WIFI_AP_PASSWORD) : WiFi.softAP(wifiApSsid.c_str());
+      delay(100);
+      IPAddress apIP = WiFi.softAPIP();
+      wifiDns.start(53, "*", apIP);
+      wifiApMode = true;
+      Serial.print("WiFi AP portal restarted ");
+      Serial.print(apOK ? "OK" : "FAILED");
+      Serial.print(" SSID=");
+      Serial.print(wifiApSsid);
+      Serial.print(" IP=");
+      Serial.println(apIP);
+    }
+    return;
+  }
+
+  wifiApMode = true;
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.setSleep(false);
+
+  bool apOK = (strlen(WIFI_AP_PASSWORD) >= 8) ? WiFi.softAP(wifiApSsid.c_str(), WIFI_AP_PASSWORD) : WiFi.softAP(wifiApSsid.c_str());
+  delay(100);
+  IPAddress apIP = WiFi.softAPIP();
+  wifiDns.start(53, "*", apIP);
+
+  wifiServer.on("/", HTTP_GET, []() { sendWifiPortalIndex(); });
+  wifiServer.on("/wifi_index.html", HTTP_GET, []() { sendWifiPortalIndex(); });
+  wifiServer.on("/generate_204", HTTP_GET, []() { wifiServer.sendHeader("Location", "/", true); wifiServer.send(302, "text/plain", ""); });
+  wifiServer.on("/fwlink", HTTP_GET, []() { wifiServer.sendHeader("Location", "/", true); wifiServer.send(302, "text/plain", ""); });
+
+  wifiServer.on("/api/status", HTTP_GET, []() { wifiServer.send(200, "application/json", wifiStatusJson()); });
+  wifiServer.on("/api/networks", HTTP_GET, []() { wifiServer.send(200, "application/json", wifiNetworksJson()); });
+  wifiServer.on("/api/scan", HTTP_GET, []() { wifiServer.send(200, "application/json", wifiScanJson()); });
+  wifiServer.on("/api/save", HTTP_POST, []() { handleWifiSave(); });
+  wifiServer.on("/api/delete", HTTP_POST, []() { handleWifiDelete(); });
+  wifiServer.on("/api/connect", HTTP_POST, []() {
+    wifiConnectRequested = true;
+    wifiServer.send(200, "application/json", F("{\"ok\":true,\"message\":\"Connecting...\"}"));
+  });
+
+  // Backward-compatible routes for old forms/tools.
+  wifiServer.on("/save", HTTP_POST, []() { handleWifiSave(); });
+  wifiServer.on("/delete", HTTP_GET, []() { handleWifiDelete(); });
+  wifiServer.on("/connect", HTTP_GET, []() {
+    wifiConnectRequested = true;
+    wifiServer.sendHeader("Location", "/", true);
+    wifiServer.send(302, "text/plain", "");
+  });
+  wifiServer.on("/scan", HTTP_GET, []() { wifiServer.send(200, "application/json", wifiScanJson()); });
+
+  wifiServer.onNotFound([]() {
+    wifiServer.sendHeader("Location", "/", true);
+    wifiServer.send(302, "text/plain", "");
+  });
+
+  wifiServer.begin();
+  wifiServerStarted = true;
+
+  Serial.print("WiFi AP portal ");
+  Serial.print(apOK ? "started" : "failed");
+  Serial.print(" SSID=");
+  Serial.print(wifiApSsid);
+  Serial.print(" IP=");
+  Serial.println(apIP);
+}
+
+static void stopWifiPortalIfConnected() {
+  if (!wifiApMode || WiFi.status() != WL_CONNECTED) return;
+  // Keep the web server object alive, but stop AP radio to reduce noise/current.
+  wifiDns.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+  wifiApMode = false;
+  Serial.println("WiFi AP portal stopped after STA connected.");
+}
+
+static void wifiManagerBeginFromOptionTask() {
+  Serial.println("WiFi manager: default first, then fast-scan NVS credentials, then AP portal.");
+  if (connectDefaultWifiFirst()) return;
+  if (connectStoredWifiFast()) return;
+  startWifiPortal();
+}
+
+static void wifiManagerLoop() {
+  if (wifiServerStarted) {
+    wifiDns.processNextRequest();
+    wifiServer.handleClient();
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    stopWifiPortalIfConnected();
+    return;
+  }
+
+  uint32_t nowMs = millis();
+  if (wifiConnectRequested || (!wifiApMode && nowMs - wifiLastRetryMs > WIFI_RETRY_PERIOD_MS)) {
+    wifiConnectRequested = false;
+    wifiLastRetryMs = nowMs;
+    if (!connectDefaultWifiFirst() && !connectStoredWifiFast()) {
+      startWifiPortal();
+    }
+  }
+}
+
+
+
 void optionTask(void *pvParameters) {
-  Serial.println("OptionTask started on Core " + String(xPortGetCoreID()) + " (low priority, Serial/logger/options)");
+  Serial.println("OptionTask started on Core " + String(xPortGetCoreID()) + " (low priority, Serial/logger/options/WiFi manager)");
   Serial.println();
   Serial.println("direction,DAC_set_V,DAC_code,DAC_expected_V,ADC_raw,ADC_V,ADC_delta_V,current_A,RTIA_ohm,TIACN,AutoRange,timestamp_us,period_us");
 
   MeasurementData data;
   uint32_t lastI2CStatusMs = 0;
+
+  wifiManagerBeginFromOptionTask();
+  requestTftFullRefresh();
 
   while (true) {
     // 1) Serial commands
@@ -1512,6 +2310,12 @@ void optionTask(void *pvParameters) {
     }
 #endif
 
+#if ENABLE_TFT_DISPLAY
+    serviceTftRefresh();
+#endif
+
+    wifiManagerLoop();
+
     // Always yield. OptionTask must never starve the idle task.
     vTaskDelay(pdMS_TO_TICKS(20));
   }
@@ -1525,7 +2329,7 @@ void setup() {
   delay(1000);
 
   Serial.println();
-  Serial.println("PotenV2 Rev.2.0 Multitask Test");
+  Serial.println("smart-ec Rev.2.0 Multitask Test");
   Serial.println("DAC AD5680 + ADC AD7694 + LMP91000 + TFT ILI9488");
   Serial.println();
 
@@ -1546,10 +2350,10 @@ void setup() {
   }
 
 #if ENABLE_TFT_DISPLAY && ENABLE_TOUCH_CONTROL
-  if (!SPIFFS.begin(true)) {
-    Serial.println("SPIFFS mount failed. Touch calibration will not be saved.");
+  if (!LittleFS.begin(false)) {
+    Serial.println("LittleFS mount failed. Touch calibration and HTML portal will not be available.");
   } else {
-    Serial.println("SPIFFS mounted OK.");
+    Serial.println("LittleFS mounted OK.");
   }
 #endif
 
@@ -1658,9 +2462,12 @@ void setup() {
   Serial.println("  u = manual TFT refresh, STOP only");
   Serial.println("  t = touch status once");
   Serial.println("  w = raw XPT2046 touch values");
-  Serial.println("  c = calibrate touch and save to SPIFFS");
+  Serial.println("  c = calibrate touch and save to LittleFS");
   Serial.println("  x = delete touch calibration file");
   Serial.println("  d = print diagnostics");
+  Serial.println("  WiFi manager: default WiFi -> NVS saved networks -> AP portal");
+  Serial.println("  Portal file: /wifi_index.html in LittleFS");
+  Serial.println("  Credentials: NVS namespace smart_ec, key wifi_list_v1");
   Serial.println();
 
 
@@ -1680,7 +2487,7 @@ void setup() {
   xTaskCreatePinnedToCore(
     optionTask,
     "OptionTask",
-    8192,
+    12288,
     nullptr,
     OPTION_PRIORITY,
     &optionTaskHandle,
