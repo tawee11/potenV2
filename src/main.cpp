@@ -104,6 +104,7 @@ static const uint32_t ADC_CONVERSION_US   = 6;       // AD7694 conversion wait
 static const uint32_t ADC_BETWEEN_AVG_US  = 100;     // gap between averaged ADC reads
 static const uint8_t  ADC_AVG_SAMPLES     = 4;
 static const uint32_t SWEEP_INTERVAL_MS   = 3000;
+static const uint32_t HOLD_CENTER_INTERVAL_MS = 250;
 
 // ======================================================
 // Auto-range policy for LMP91000 TIA
@@ -347,7 +348,15 @@ enum SweepDirection : int8_t {
   DIR_DOWN   = -1
 };
 
+enum MeasurementMode : uint8_t {
+  MEAS_MODE_SWEEP = 0,
+  MEAS_MODE_HOLD_CENTER = 1
+};
+
+volatile MeasurementMode currentMeasurementMode = MEAS_MODE_SWEEP;
+
 struct MeasurementData {
+  MeasurementMode mode;
   uint32_t sampleIndex;
   SweepDirection direction;
   float dacSetVoltage;
@@ -409,6 +418,34 @@ static const char *directionToText(SweepDirection d) {
   if (d == DIR_UP) return "UP";
   if (d == DIR_DOWN) return "DOWN";
   return "CENTER";
+}
+
+static const char *measurementModeToText(MeasurementMode mode) {
+  if (mode == MEAS_MODE_HOLD_CENTER) return "HOLD_CENTER";
+  return "SWEEP";
+}
+
+static MeasurementMode parseMeasurementMode(const String &value, MeasurementMode fallback) {
+  String mode = value;
+  mode.trim();
+  mode.toLowerCase();
+
+  if (mode == "sweep" || mode == "cv" || mode == "0") return MEAS_MODE_SWEEP;
+  if (mode == "hold" || mode == "hold_center" || mode == "center" || mode == "1") return MEAS_MODE_HOLD_CENTER;
+  return fallback;
+}
+
+static MeasurementMode getMeasurementMode() {
+  return currentMeasurementMode;
+}
+
+static bool setMeasurementMode(MeasurementMode mode) {
+  if (measurementEnabled || measurementBusy) {
+    return false;
+  }
+
+  currentMeasurementMode = mode;
+  return true;
 }
 
 void printHex8(const char *name, uint8_t value) {
@@ -795,13 +832,14 @@ void publishMeasurement(const MeasurementData &data) {
 // ======================================================
 // Single measurement point
 // ======================================================
-void measureOnePoint(float dacSetVoltage, SweepDirection direction, uint32_t &sampleIndex) {
+void measureOnePoint(MeasurementMode mode, float dacSetVoltage, SweepDirection direction, uint32_t &sampleIndex) {
   MeasurementData data;
 
   uint64_t t0 = esp_timer_get_time();
 
   measurementBusy = true;
 
+  data.mode = mode;
   data.sampleIndex = sampleIndex++;
   data.direction = direction;
   data.dacSetVoltage = dacSetVoltage;
@@ -836,6 +874,57 @@ void measureOnePoint(float dacSetVoltage, SweepDirection direction, uint32_t &sa
   publishMeasurement(data);
 }
 
+static void runSweepMode(uint32_t &sampleIndex) {
+  Serial.println("Measurement sweep start");
+
+  // Sweep up: 0.000V to 4.090V, step 10mV
+  for (int mv = 0; mv <= 4090; mv += 10) {
+    if (!measurementEnabled || measurementStopRequested) break;
+    measureOnePoint(MEAS_MODE_SWEEP, mv / 1000.0f, DIR_UP, sampleIndex);
+    vTaskDelay(1);
+  }
+
+  // Full-scale point 4.096V
+  if (measurementEnabled && !measurementStopRequested) {
+    measureOnePoint(MEAS_MODE_SWEEP, 4.096f, DIR_UP, sampleIndex);
+    vTaskDelay(1);
+  }
+
+  // Sweep down: 4.090V to 0.000V, step 10mV
+  for (int mv = 4090; mv >= 0; mv -= 10) {
+    if (!measurementEnabled || measurementStopRequested) break;
+    measureOnePoint(MEAS_MODE_SWEEP, mv / 1000.0f, DIR_DOWN, sampleIndex);
+    vTaskDelay(1);
+  }
+
+  // Center point
+  if (measurementEnabled && !measurementStopRequested) {
+    measureOnePoint(MEAS_MODE_SWEEP, 2.048f, DIR_CENTER, sampleIndex);
+  }
+
+  Serial.println("Measurement sweep done");
+
+  setMeasurementPriority(false);
+
+  uint32_t waitedMs = 0;
+  while (measurementEnabled && !measurementStopRequested && waitedMs < SWEEP_INTERVAL_MS) {
+    vTaskDelay(pdMS_TO_TICKS(20));
+    waitedMs += 20;
+  }
+}
+
+static void runHoldCenterMode(uint32_t &sampleIndex) {
+  measureOnePoint(MEAS_MODE_HOLD_CENTER, 2.048f, DIR_CENTER, sampleIndex);
+
+  setMeasurementPriority(false);
+
+  uint32_t waitedMs = 0;
+  while (measurementEnabled && !measurementStopRequested && waitedMs < HOLD_CENTER_INTERVAL_MS) {
+    vTaskDelay(pdMS_TO_TICKS(20));
+    waitedMs += 20;
+  }
+}
+
 // ======================================================
 // Tasks
 // ======================================================
@@ -866,46 +955,17 @@ void measurementTask(void *pvParameters) {
     measurementStopRequested = false;
     setMeasurementPriority(true);
 
-    Serial.println("Measurement started");
+    MeasurementMode mode = getMeasurementMode();
+    Serial.print("Measurement started mode=");
+    Serial.println(measurementModeToText(mode));
 
     while (measurementEnabled && !measurementStopRequested) {
-      Serial.println("Measurement sweep start");
+      mode = getMeasurementMode();
 
-      // Sweep up: 0.000V to 4.090V, step 10mV
-      for (int mv = 0; mv <= 4090; mv += 10) {
-        if (!measurementEnabled || measurementStopRequested) break;
-        measureOnePoint(mv / 1000.0f, DIR_UP, sampleIndex);
-        vTaskDelay(1);
-      }
-
-      // Full-scale point 4.096V
-      if (measurementEnabled && !measurementStopRequested) {
-        measureOnePoint(4.096f, DIR_UP, sampleIndex);
-        vTaskDelay(1);
-      }
-
-      // Sweep down: 4.090V to 0.000V, step 10mV
-      for (int mv = 4090; mv >= 0; mv -= 10) {
-        if (!measurementEnabled || measurementStopRequested) break;
-        measureOnePoint(mv / 1000.0f, DIR_DOWN, sampleIndex);
-        vTaskDelay(1);
-      }
-
-      // Center point
-      if (measurementEnabled && !measurementStopRequested) {
-        measureOnePoint(2.048f, DIR_CENTER, sampleIndex);
-      }
-
-      Serial.println("Measurement sweep done");
-
-      // Lower priority while waiting between sweeps. If STOP is requested during
-      // this interval, the task exits quickly instead of sleeping for the full time.
-      setMeasurementPriority(false);
-
-      uint32_t waitedMs = 0;
-      while (measurementEnabled && !measurementStopRequested && waitedMs < SWEEP_INTERVAL_MS) {
-        vTaskDelay(pdMS_TO_TICKS(20));
-        waitedMs += 20;
+      if (mode == MEAS_MODE_HOLD_CENTER) {
+        runHoldCenterMode(sampleIndex);
+      } else {
+        runSweepMode(sampleIndex);
       }
 
       if (measurementEnabled && !measurementStopRequested) {
@@ -975,42 +1035,46 @@ void drawMeasurement(const MeasurementData &data) {
   lcd.setTextColor(TFT_CYAN, TFT_BLACK);
   lcd.setTextSize(2);
 
-  lcd.fillRect(10, 80, 460, 230, TFT_BLACK);
+  lcd.fillRect(10, 80, 460, 280, TFT_BLACK);
 
   lcd.setCursor(10, 80);
+  lcd.print("Mode: ");
+  lcd.println(measurementModeToText(data.mode));
+
+  lcd.setCursor(10, 110);
   lcd.print("Dir: ");
   lcd.println(directionToText(data.direction));
 
-  lcd.setCursor(10, 110);
+  lcd.setCursor(10, 140);
   lcd.print("DAC set: ");
   lcd.print(data.dacSetVoltage, 3);
   lcd.println(" V");
 
-  lcd.setCursor(10, 140);
+  lcd.setCursor(10, 170);
   lcd.print("DAC code: ");
   lcd.println(data.dacCode);
 
-  lcd.setCursor(10, 170);
+  lcd.setCursor(10, 200);
   lcd.print("ADC raw: ");
   lcd.println(data.adcRaw);
 
-  lcd.setCursor(10, 200);
+  lcd.setCursor(10, 230);
   lcd.print("ADC V: ");
   lcd.print(data.adcVoltage, 6);
   lcd.println(" V");
 
-  lcd.setCursor(10, 230);
+  lcd.setCursor(10, 260);
   lcd.print("RTIA: ");
   lcd.print(data.rtiaOhm, 0);
   lcd.print(" ohm ");
   lcd.print(data.autoRangeAction);
 
-  lcd.setCursor(10, 260);
+  lcd.setCursor(10, 290);
   lcd.print("I: ");
   lcd.print(data.currentAmp * 1000000.0f, 3);
   lcd.println(" uA");
 
-  lcd.setCursor(10, 290);
+  lcd.setCursor(10, 320);
   lcd.print("Period: ");
   lcd.print(data.period_us);
   lcd.println(" us");
@@ -1064,6 +1128,8 @@ void serviceTftRefresh() {}
 // Option task helpers: Serial / logger / I2C / manual TFT
 // ======================================================
 void printMeasurementCsv(const MeasurementData &data) {
+  Serial.print(measurementModeToText(data.mode));
+  Serial.print(',');
   Serial.print(directionToText(data.direction));
   Serial.print(',');
   Serial.print(data.dacSetVoltage, 3);
@@ -1469,12 +1535,27 @@ void resetAutoRangeToLowestForNewRun() {
   }
 }
 
+void printMeasurementMode() {
+  Serial.print("Measurement mode=");
+  Serial.println(measurementModeToText(getMeasurementMode()));
+}
+
+void selectMeasurementModeFromSerial(MeasurementMode mode) {
+  if (!setMeasurementMode(mode)) {
+    Serial.println("Mode change skipped: STOP measurement first");
+    return;
+  }
+
+  printMeasurementMode();
+  requestTftFullRefresh();
+}
+
 void handleSerialCommand(char c) {
   if (c == '\r' || c == '\n') return;
 
   if (c == 'r' || c == 'R') {
     if (measurementEnabled) {
-      Serial.println("Measurement already running; send 's' first before starting a new 2.75k run");
+      Serial.println("Measurement already running; send 's' first before starting a new run");
       return;
     }
 
@@ -1482,7 +1563,9 @@ void handleSerialCommand(char c) {
     requestMeasurementRun();
     digitalWrite(LED_BUILTIN_PIN, LOW);
     refreshRunButtonFromOptionTask();
-    Serial.println("Measurement RUN from RTIA 2.75k");
+    Serial.print("Measurement RUN mode=");
+    Serial.print(measurementModeToText(getMeasurementMode()));
+    Serial.println(" from configured RTIA start range");
   }
   else if (c == 's' || c == 'S') {
     requestMeasurementStop();
@@ -1527,6 +1610,7 @@ void handleSerialCommand(char c) {
     Serial.println(measurementBusy ? "true" : "false");
     Serial.print("measurementPriorityIsHigh=");
     Serial.println(measurementPriorityIsHigh ? "true" : "false");
+    printMeasurementMode();
     Serial.print("loggerDropCount=");
     Serial.println(loggerDropCount);
     Serial.print("autoRange=");
@@ -1553,6 +1637,16 @@ void handleSerialCommand(char c) {
     Serial.print("CALIBRATION_FILE=");
     Serial.println(CALIBRATION_FILE);
 #endif
+  }
+  else if (c == '1') {
+    selectMeasurementModeFromSerial(MEAS_MODE_SWEEP);
+  }
+  else if (c == '2') {
+    selectMeasurementModeFromSerial(MEAS_MODE_HOLD_CENTER);
+  }
+  else if (c == 'm' || c == 'M') {
+    printMeasurementMode();
+    Serial.println("Modes: 1=SWEEP, 2=HOLD_CENTER");
   }
 }
 
@@ -2072,6 +2166,13 @@ static String wifiStatusJson() {
   json += jsonEscape(WIFI_PORTAL_FILE);
   json += F("\",\"saved_count\":");
   json += String(wifiCredCount);
+  json += F(",\"measurement_running\":");
+  json += measurementEnabled ? F("true") : F("false");
+  json += F(",\"measurement_busy\":");
+  json += measurementBusy ? F("true") : F("false");
+  json += F(",\"measurement_mode\":\"");
+  json += measurementModeToText(getMeasurementMode());
+  json += F("\"");
   json += F("}");
   return json;
 }
@@ -2155,6 +2256,101 @@ static String wifiScanJson() {
   return json;
 }
 
+static String latestMeasurementJson() {
+  String json = F("null");
+  if (!hasLastMeasurement) return json;
+
+  MeasurementData data = lastMeasurement;
+  json = F("{\"mode\":\"");
+  json += measurementModeToText(data.mode);
+  json += F("\",\"direction\":\"");
+  json += directionToText(data.direction);
+  json += F("\",\"sample_index\":");
+  json += String(data.sampleIndex);
+  json += F(",\"dac_set_v\":");
+  json += String(data.dacSetVoltage, 3);
+  json += F(",\"dac_code\":");
+  json += String(data.dacCode);
+  json += F(",\"dac_expected_v\":");
+  json += String(data.dacExpectedVoltage, 6);
+  json += F(",\"adc_raw\":");
+  json += String(data.adcRaw);
+  json += F(",\"adc_v\":");
+  json += String(data.adcVoltage, 6);
+  json += F(",\"adc_delta_v\":");
+  json += String(data.adcDeltaVoltage, 6);
+  json += F(",\"current_a\":");
+  json += String(data.currentAmp, 12);
+  json += F(",\"rtia_ohm\":");
+  json += String(data.rtiaOhm, 0);
+  json += F(",\"tia_cn\":\"0x");
+  if (data.tiaCN < 0x10) json += '0';
+  json += String(data.tiaCN, HEX);
+  json += F("\",\"auto_range\":\"");
+  json += data.autoRangeAction;
+  json += F("\",\"timestamp_us\":");
+  char timestampBuf[24];
+  snprintf(timestampBuf, sizeof(timestampBuf), "%llu", (unsigned long long)data.timestamp_us);
+  json += timestampBuf;
+  json += F(",\"period_us\":");
+  json += String(data.period_us);
+  json += F("}");
+  return json;
+}
+
+static String measurementStatusJson() {
+  String json = F("{\"running\":");
+  json += measurementEnabled ? F("true") : F("false");
+  json += F(",\"busy\":");
+  json += measurementBusy ? F("true") : F("false");
+  json += F(",\"stop_requested\":");
+  json += measurementStopRequested ? F("true") : F("false");
+  json += F(",\"mode\":\"");
+  json += measurementModeToText(getMeasurementMode());
+  json += F("\",\"modes\":[\"SWEEP\",\"HOLD_CENTER\"]");
+  json += F(",\"latest\":");
+  json += latestMeasurementJson();
+  json += F("}");
+  return json;
+}
+
+static void handleMeasurementModeApi() {
+  MeasurementMode requested = parseMeasurementMode(wifiServer.arg("mode"), getMeasurementMode());
+  if (!setMeasurementMode(requested)) {
+    wifiServer.send(409, "application/json", F("{\"ok\":false,\"message\":\"Stop measurement before changing mode\"}"));
+    return;
+  }
+
+  requestTftFullRefresh();
+  wifiServer.send(200, "application/json", measurementStatusJson());
+}
+
+static void handleMeasurementStartApi() {
+  if (wifiServer.hasArg("mode")) {
+    MeasurementMode requested = parseMeasurementMode(wifiServer.arg("mode"), getMeasurementMode());
+    if (!setMeasurementMode(requested)) {
+      wifiServer.send(409, "application/json", F("{\"ok\":false,\"message\":\"Stop measurement before changing mode\"}"));
+      return;
+    }
+  }
+
+  if (!measurementEnabled) {
+    resetAutoRangeToLowestForNewRun();
+    requestMeasurementRun();
+    digitalWrite(LED_BUILTIN_PIN, LOW);
+    refreshRunButtonFromOptionTask();
+  }
+
+  wifiServer.send(200, "application/json", measurementStatusJson());
+}
+
+static void handleMeasurementStopApi() {
+  requestMeasurementStop();
+  digitalWrite(LED_BUILTIN_PIN, HIGH);
+  refreshRunButtonFromOptionTask();
+  wifiServer.send(200, "application/json", measurementStatusJson());
+}
+
 static void startWifiPortal() {
   uint64_t mac = ESP.getEfuseMac();
   char suffix[7];
@@ -2199,6 +2395,10 @@ static void startWifiPortal() {
   wifiServer.on("/api/status", HTTP_GET, []() { wifiServer.send(200, "application/json", wifiStatusJson()); });
   wifiServer.on("/api/networks", HTTP_GET, []() { wifiServer.send(200, "application/json", wifiNetworksJson()); });
   wifiServer.on("/api/scan", HTTP_GET, []() { wifiServer.send(200, "application/json", wifiScanJson()); });
+  wifiServer.on("/api/measurement/status", HTTP_GET, []() { wifiServer.send(200, "application/json", measurementStatusJson()); });
+  wifiServer.on("/api/measurement/mode", HTTP_POST, []() { handleMeasurementModeApi(); });
+  wifiServer.on("/api/measurement/start", HTTP_POST, []() { handleMeasurementStartApi(); });
+  wifiServer.on("/api/measurement/stop", HTTP_POST, []() { handleMeasurementStopApi(); });
   wifiServer.on("/api/save", HTTP_POST, []() { handleWifiSave(); });
   wifiServer.on("/api/delete", HTTP_POST, []() { handleWifiDelete(); });
   wifiServer.on("/api/connect", HTTP_POST, []() {
@@ -2275,7 +2475,7 @@ static void wifiManagerLoop() {
 void optionTask(void *pvParameters) {
   Serial.println("OptionTask started on Core " + String(xPortGetCoreID()) + " (low priority, Serial/logger/options/WiFi manager)");
   Serial.println();
-  Serial.println("direction,DAC_set_V,DAC_code,DAC_expected_V,ADC_raw,ADC_V,ADC_delta_V,current_A,RTIA_ohm,TIACN,AutoRange,timestamp_us,period_us");
+  Serial.println("mode,direction,DAC_set_V,DAC_code,DAC_expected_V,ADC_raw,ADC_V,ADC_delta_V,current_A,RTIA_ohm,TIACN,AutoRange,timestamp_us,period_us");
 
   MeasurementData data;
   uint32_t lastI2CStatusMs = 0;
@@ -2455,8 +2655,11 @@ void setup() {
 
   Serial.println();
   Serial.println("Commands:");
-  Serial.println("  r = run measurement, reset RTIA to 2.75k first");
+  Serial.println("  r = run measurement, reset RTIA start range first");
   Serial.println("  s = stop measurement");
+  Serial.println("  1 = select SWEEP mode");
+  Serial.println("  2 = select HOLD_CENTER mode (2.048V repeated)");
+  Serial.println("  m = print selected measurement mode");
   Serial.println("  p = print LMP91000 registers");
   Serial.println("  g = set TIA range back to 35k");
   Serial.println("  u = manual TFT refresh, STOP only");

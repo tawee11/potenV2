@@ -71,6 +71,22 @@
       <p class="small">Select a network from the scan result to fill the SSID field automatically.</p>
       <div id="scanList" class="scan-list"><p class="small">No scan has been run yet.</p></div>
     </section>
+
+    <section class="card" style="margin-top:16px">
+      <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap">
+        <div>
+          <h2 style="margin:0">Measurement</h2>
+          <p id="measurementStatus" class="small">Loading measurement status...</p>
+        </div>
+        <div class="actions" style="margin-top:0">
+          <button class="ghost" onclick="setMode('SWEEP')">Sweep</button>
+          <button class="ghost" onclick="setMode('HOLD_CENTER')">Hold Center</button>
+          <button class="primary" onclick="startMeasurement()">Start</button>
+          <button class="danger" onclick="stopMeasurement()">Stop</button>
+        </div>
+      </div>
+      <div id="measurementLatest" class="small"></div>
+    </section>
   </div>
   <div id="toast" class="toast"></div>
 
@@ -100,12 +116,28 @@ async function scanWifi(){
   try{ const data=await getJson('/api/scan'); const arr=(data.scan_result||[]).sort((a,b)=>b.rssi-a.rssi); if(!arr.length){box.innerHTML='<p class="small">No WiFi networks found.</p>';return;} box.innerHTML=arr.map(ap=>`<div class="scan"><div><b>${escapeHtml(ap.ssid||'(hidden)')}</b><div class="rssi">RSSI ${ap.rssi} dBm · CH ${ap.channel}</div></div><button onclick="selectSsid('${jsString(ap.ssid||'')}')">Use</button></div>`).join(''); }
   catch(e){ box.innerHTML=`<p class="small">Scan error: ${escapeHtml(e.message)}</p>`; }
 }
+async function loadMeasurement(){
+  try{
+    const m=await getJson('/api/measurement/status');
+    $('measurementStatus').textContent=`${m.running?'Running':'Stopped'} · mode ${m.mode}${m.busy?' · sampling':''}`;
+    if(m.latest){
+      $('measurementLatest').innerHTML=`Latest: ${escapeHtml(m.latest.mode)} · ${escapeHtml(m.latest.direction)} · DAC ${Number(m.latest.dac_set_v).toFixed(3)} V · ADC ${Number(m.latest.adc_v).toFixed(6)} V · I ${(Number(m.latest.current_a)*1000000).toFixed(3)} uA`;
+    }else{
+      $('measurementLatest').textContent='No measurement sample yet.';
+    }
+  }catch(e){
+    $('measurementStatus').textContent='Measurement status error: '+e.message;
+  }
+}
+async function setMode(mode){ await getJson('/api/measurement/mode',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'mode='+encodeURIComponent(mode)}); toast('Mode set to '+mode); loadMeasurement(); }
+async function startMeasurement(){ await getJson('/api/measurement/start',{method:'POST'}); toast('Measurement started'); loadMeasurement(); }
+async function stopMeasurement(){ await getJson('/api/measurement/stop',{method:'POST'}); toast('Measurement stopped'); loadMeasurement(); }
 function selectSsid(ssid){ $('ssid').value=ssid; $('pass').focus(); toast('SSID selected'); }
 $('wifiForm').addEventListener('submit', async (ev)=>{ ev.preventDefault(); const fd=new FormData(ev.target); if(!$('enterprise').checked) fd.delete('enterprise'); try{ const r=await fetch('/api/save',{method:'POST',body:new URLSearchParams(fd)}); const j=await r.json(); toast(j.message||'Saved'); setTimeout(refreshAll,1400); }catch(e){toast('Save error: '+e.message);} });
-function refreshAll(){ loadStatus(); loadNetworks(); }
+function refreshAll(){ loadStatus(); loadNetworks(); loadMeasurement(); }
 function escapeHtml(s){ return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 function jsString(s){ return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\n/g,''); }
-toggleEnterprise(); refreshAll(); setInterval(loadStatus,5000);
+toggleEnterprise(); refreshAll(); setInterval(loadStatus,5000); setInterval(loadMeasurement,1500);
 </script>
 </body>
 </html>
