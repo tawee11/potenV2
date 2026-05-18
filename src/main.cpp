@@ -3,10 +3,13 @@
 #include <SPI.h>
 #include <FS.h>
 #include <LittleFS.h>
+#include <SD_MMC.h>
 #include <Preferences.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
+#include <time.h>
+#include "esp_system.h"
 #if __has_include(<esp_wpa2.h>)
 #include <esp_wpa2.h>
 #define POTENV2_HAS_WPA2_ENTERPRISE 1
@@ -41,6 +44,7 @@
 #define ENABLE_TOUCH_CONTROL     1
 #define ENABLE_TOUCH_POLLING     1
 #define ENABLE_I2C_MONITOR_TASK  0
+#define ENABLE_SD_LOGGING        1
 
 // ======================================================
 // Pin Mapping
@@ -88,6 +92,14 @@
 // Optional built-in LED
 #define LED_BUILTIN_PIN 2
 
+// SD_MMC, same pin mapping as backup/SDmmc.cpp.
+#define SD_CLK 39
+#define SD_CMD 38
+#define SD_D0  40
+#define SD_D1  41
+#define SD_D2  42
+#define SD_D3  18
+
 // ======================================================
 // Voltage reference
 // ======================================================
@@ -105,6 +117,12 @@ static const uint32_t ADC_BETWEEN_AVG_US  = 100;     // gap between averaged ADC
 static const uint8_t  ADC_AVG_SAMPLES     = 4;
 static const uint32_t SWEEP_INTERVAL_MS   = 3000;
 static const uint32_t HOLD_CENTER_INTERVAL_MS = 250;
+static const uint8_t  SD_WRITE_BATCH_LIMIT = 32;
+static const uint32_t SD_FLUSH_INTERVAL_MS = 5000;
+static const uint16_t CV_SERIAL_LOG_EVERY = 200;
+static const float POTENTIAL_ZERO_V = ADC_VREF * 0.5f; // electrode 0V maps to DAC 2.048V
+static const float CV_MIN_POTENTIAL_V = -POTENTIAL_ZERO_V;
+static const float CV_MAX_POTENTIAL_V = DAC_VREF - POTENTIAL_ZERO_V;
 
 // ======================================================
 // Auto-range policy for LMP91000 TIA
@@ -145,6 +163,22 @@ static const int8_t TIA_RANGE_COUNT = sizeof(tiaRanges) / sizeof(tiaRanges[0]);
 static int8_t currentTiaRangeIndex = 4; // default 35k, same as original TIACN=0x14
 static uint8_t autoRangeLowCount = 0;
 static uint8_t autoRangeHighCount = 0;
+
+static const char *resetReasonToText(esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON: return "POWERON";
+    case ESP_RST_EXT: return "EXT";
+    case ESP_RST_SW: return "SW";
+    case ESP_RST_PANIC: return "PANIC";
+    case ESP_RST_INT_WDT: return "INT_WDT";
+    case ESP_RST_TASK_WDT: return "TASK_WDT";
+    case ESP_RST_WDT: return "WDT";
+    case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+    case ESP_RST_BROWNOUT: return "BROWNOUT";
+    case ESP_RST_SDIO: return "SDIO";
+    default: return "UNKNOWN";
+  }
+}
 
 // ======================================================
 // Shared Hardware SPI + LovyanGFX
@@ -272,6 +306,14 @@ static const int16_t BTN_H = 45;
 #define REG_REFCN  0x11
 #define REG_MODECN 0x12
 
+// PCF85363A RTC, UTC time base.
+#define PCF85363_ADDR 0x51
+#define PCF_REG_100TH_SECONDS 0x00
+#define PCF_REG_SECONDS       0x01
+#define PCF_REG_MINUTES       0x02
+#define PCF_REG_STOP_ENABLE   0x2E
+#define PCF_REG_RESETS        0x2F
+
 // ======================================================
 // FreeRTOS objects
 // ======================================================
@@ -280,6 +322,7 @@ static SemaphoreHandle_t i2cMutex = nullptr;
 
 static TaskHandle_t measurementTaskHandle = nullptr;
 static TaskHandle_t optionTaskHandle = nullptr;
+static TaskHandle_t sdWriterTaskHandle = nullptr;
 
 // ======================================================
 // Task priority policy
@@ -294,6 +337,9 @@ static const UBaseType_t MEAS_PRIORITY_RUN  = 5;
 static const UBaseType_t OPTION_PRIORITY    = 2;
 
 static QueueHandle_t loggerQueue = nullptr;
+static QueueHandle_t sdRecordQueue = nullptr;
+
+static bool initSdCard();
 
 // ======================================================
 // Runtime state
@@ -302,6 +348,38 @@ volatile bool measurementEnabled = false;
 volatile bool measurementBusy = false;
 volatile bool measurementStopRequested = true;
 volatile bool measurementPriorityIsHigh = false;
+volatile bool serialDebugMode = false;
+static bool serialCsvHeaderPrinted = false;
+static bool serialDebugModeLastReported = false;
+static uint32_t lastSerialInputMs = 0;
+
+static bool serialConnectionPresent() {
+#if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
+  return (bool)Serial;
+#else
+  // With an external USB-UART bridge there is no reliable passive connection
+  // signal. Seeing RX data means a terminal/operator is present.
+  return lastSerialInputMs != 0;
+#endif
+}
+
+static void updateSerialDebugMode(bool serialInputSeen = false) {
+  if (serialInputSeen) {
+    lastSerialInputMs = millis();
+  }
+
+  bool connected = serialConnectionPresent();
+  serialDebugMode = connected;
+
+  if (serialDebugMode && !serialDebugModeLastReported) {
+    Serial.println();
+    Serial.println("Serial debug mode ON");
+    Serial.println("mode,direction,DAC_set_V,DAC_code,DAC_expected_V,ADC_raw,ADC_V,ADC_delta_V,current_A,RTIA_ohm,TIACN,AutoRange,timestamp_us,period_us");
+    serialCsvHeaderPrinted = true;
+  }
+
+  serialDebugModeLastReported = serialDebugMode;
+}
 
 void setMeasurementPriority(bool high) {
   if (!measurementTaskHandle) return;
@@ -350,7 +428,8 @@ enum SweepDirection : int8_t {
 
 enum MeasurementMode : uint8_t {
   MEAS_MODE_SWEEP = 0,
-  MEAS_MODE_HOLD_CENTER = 1
+  MEAS_MODE_HOLD_CENTER = 1,
+  MEAS_MODE_CV = 2
 };
 
 volatile MeasurementMode currentMeasurementMode = MEAS_MODE_SWEEP;
@@ -371,6 +450,96 @@ struct MeasurementData {
   char autoRangeAction; // '-' no change, 'U' gain up, 'D' gain down
   uint64_t timestamp_us;
   uint32_t period_us;
+};
+
+struct CvConfig {
+  char experimentName[32];
+  float startV;
+  float vertex1V;
+  float vertex2V;
+  float finalV;
+  float stepV;
+  float scanRateVps;
+  uint16_t cycles;
+  uint32_t quietMs;
+};
+
+static CvConfig cvConfig = {
+  "",       // experimentName
+  0.0f,     // startV, relative to POTENTIAL_ZERO_V
+  0.8f,     // vertex1V
+  -0.8f,    // vertex2V
+  0.0f,     // finalV
+  0.01f,    // stepV
+  0.1f,     // scanRateVps
+  1,        // cycles
+  0         // quietMs
+};
+
+struct CvBinHeader {
+  char magic[8];
+  uint16_t version;
+  uint16_t headerSize;
+  uint32_t recordSize;
+  uint64_t startedUs;
+  float zeroDacV;
+  float dacVref;
+  float adcVref;
+  float startV;
+  float vertex1V;
+  float vertex2V;
+  float finalV;
+  float stepV;
+  float scanRateVps;
+  uint16_t cycles;
+  uint16_t reserved;
+  uint32_t quietMs;
+  char experimentName[32];
+};
+
+struct CvBinRecord {
+  uint32_t sampleIndex;
+  int8_t direction;
+  uint8_t autoRangeAction;
+  uint8_t tiaCN;
+  uint8_t reserved;
+  uint64_t timestampUs;
+  uint32_t periodUs;
+  float potentialV;
+  float dacSetV;
+  float dacExpectedV;
+  uint32_t dacCode;
+  uint16_t adcRaw;
+  uint16_t reserved2;
+  float adcV;
+  float adcDeltaV;
+  float currentA;
+  float rtiaOhm;
+};
+
+static_assert(sizeof(CvBinHeader) == 104, "Unexpected CV header size");
+static_assert(sizeof(CvBinRecord) == 56, "Unexpected CV record size");
+
+static CvBinHeader activeCvHeader;
+static char activeCvFilePath[48] = "/cv_pending.bin";
+volatile bool cvLogActive = false;
+volatile bool sdMounted = false;
+volatile bool sdLogFileOpen = false;
+volatile uint32_t sdRecordDropCount = 0;
+volatile uint32_t sdRecordWriteCount = 0;
+volatile uint32_t sdWriteErrorCount = 0;
+volatile bool rtcAvailable = false;
+volatile bool rtcUtcSynced = false;
+static uint32_t lastNtpSyncAttemptMs = 0;
+
+struct RtcDateTime {
+  uint16_t year;
+  uint8_t month;
+  uint8_t day;
+  uint8_t hour;
+  uint8_t minute;
+  uint8_t second;
+  bool oscillatorStopped;
 };
 
 // Latest measurement for manual TFT refresh.
@@ -421,6 +590,7 @@ static const char *directionToText(SweepDirection d) {
 }
 
 static const char *measurementModeToText(MeasurementMode mode) {
+  if (mode == MEAS_MODE_CV) return "CV";
   if (mode == MEAS_MODE_HOLD_CENTER) return "HOLD_CENTER";
   return "SWEEP";
 }
@@ -430,9 +600,32 @@ static MeasurementMode parseMeasurementMode(const String &value, MeasurementMode
   mode.trim();
   mode.toLowerCase();
 
-  if (mode == "sweep" || mode == "cv" || mode == "0") return MEAS_MODE_SWEEP;
+  if (mode == "sweep" || mode == "0") return MEAS_MODE_SWEEP;
+  if (mode == "potentiostat_cv" || mode == "cv_mode" || mode == "cv" || mode == "3") return MEAS_MODE_CV;
   if (mode == "hold" || mode == "hold_center" || mode == "center" || mode == "1") return MEAS_MODE_HOLD_CENTER;
   return fallback;
+}
+
+static float clampFloat(float value, float minValue, float maxValue) {
+  if (value < minValue) return minValue;
+  if (value > maxValue) return maxValue;
+  return value;
+}
+
+static float potentialToDacVoltage(float potentialV) {
+  return clampFloat(POTENTIAL_ZERO_V + potentialV, 0.0f, DAC_VREF);
+}
+
+static float dacVoltageToPotential(float dacVoltage) {
+  return dacVoltage - POTENTIAL_ZERO_V;
+}
+
+static uint8_t decToBcd(uint8_t value) {
+  return (uint8_t)(((value / 10) << 4) | (value % 10));
+}
+
+static uint8_t bcdToDec(uint8_t value) {
+  return (uint8_t)(((value >> 4) * 10) + (value & 0x0F));
 }
 
 static MeasurementMode getMeasurementMode() {
@@ -598,6 +791,128 @@ bool lmpInitFromYourCode() {
   delay(1);
 
   return true;
+}
+
+static bool rtcWriteReg_safe(uint8_t reg, uint8_t value) {
+  if (i2cMutex) xSemaphoreTake(i2cMutex, portMAX_DELAY);
+  Wire.beginTransmission(PCF85363_ADDR);
+  Wire.write(reg);
+  Wire.write(value);
+  uint8_t err = Wire.endTransmission();
+  if (i2cMutex) xSemaphoreGive(i2cMutex);
+  return err == 0;
+}
+
+static bool rtcReadRegs_safe(uint8_t startReg, uint8_t *buffer, uint8_t len) {
+  if (i2cMutex) xSemaphoreTake(i2cMutex, portMAX_DELAY);
+
+  Wire.beginTransmission(PCF85363_ADDR);
+  Wire.write(startReg);
+  uint8_t err = Wire.endTransmission(false);
+  if (err != 0) {
+    if (i2cMutex) xSemaphoreGive(i2cMutex);
+    return false;
+  }
+
+  uint8_t received = Wire.requestFrom(PCF85363_ADDR, len);
+  if (received != len) {
+    if (i2cMutex) xSemaphoreGive(i2cMutex);
+    return false;
+  }
+
+  for (uint8_t i = 0; i < len; i++) {
+    buffer[i] = Wire.read();
+  }
+
+  if (i2cMutex) xSemaphoreGive(i2cMutex);
+  return true;
+}
+
+static bool rtcProbe_safe() {
+  if (i2cMutex) xSemaphoreTake(i2cMutex, portMAX_DELAY);
+  Wire.beginTransmission(PCF85363_ADDR);
+  uint8_t err = Wire.endTransmission();
+  if (i2cMutex) xSemaphoreGive(i2cMutex);
+  rtcAvailable = (err == 0);
+  return rtcAvailable;
+}
+
+static bool rtcReadUtc_safe(RtcDateTime &dt) {
+  uint8_t data[8];
+  if (!rtcReadRegs_safe(PCF_REG_100TH_SECONDS, data, sizeof(data))) {
+    rtcAvailable = false;
+    return false;
+  }
+
+  dt.second = bcdToDec(data[1] & 0x7F);
+  dt.minute = bcdToDec(data[2] & 0x7F);
+  dt.hour = bcdToDec(data[3] & 0x3F);
+  dt.day = bcdToDec(data[4] & 0x3F);
+  dt.month = bcdToDec(data[6] & 0x1F);
+  dt.year = 2000 + bcdToDec(data[7]);
+  dt.oscillatorStopped = (data[1] & 0x80) != 0;
+
+  rtcAvailable = true;
+  return dt.year >= 2024 && dt.month >= 1 && dt.month <= 12 && dt.day >= 1 && dt.day <= 31;
+}
+
+static bool rtcSetUtcFromTm_safe(const tm &utc) {
+  if (!rtcAvailable && !rtcProbe_safe()) return false;
+
+  rtcWriteReg_safe(PCF_REG_STOP_ENABLE, 0x01);
+  rtcWriteReg_safe(PCF_REG_RESETS, 0xA4);
+
+  if (i2cMutex) xSemaphoreTake(i2cMutex, portMAX_DELAY);
+  Wire.beginTransmission(PCF85363_ADDR);
+  Wire.write(PCF_REG_100TH_SECONDS);
+  Wire.write(0x00);
+  Wire.write(decToBcd((uint8_t)utc.tm_sec));
+  Wire.write(decToBcd((uint8_t)utc.tm_min));
+  Wire.write(decToBcd((uint8_t)utc.tm_hour));
+  Wire.write(decToBcd((uint8_t)utc.tm_mday));
+  Wire.write(decToBcd((uint8_t)utc.tm_wday));
+  Wire.write(decToBcd((uint8_t)(utc.tm_mon + 1)));
+  Wire.write(decToBcd((uint8_t)((utc.tm_year + 1900) - 2000)));
+  uint8_t err = Wire.endTransmission();
+  if (i2cMutex) xSemaphoreGive(i2cMutex);
+
+  rtcWriteReg_safe(PCF_REG_STOP_ENABLE, 0x00);
+
+  rtcAvailable = (err == 0);
+  rtcUtcSynced = rtcAvailable;
+  return rtcAvailable;
+}
+
+static bool syncUtcTimeFromNtpToRtc(uint32_t timeoutMs) {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (!rtcAvailable && !rtcProbe_safe()) return false;
+
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov", "time.google.com");
+  uint32_t startMs = millis();
+  tm utc;
+  memset(&utc, 0, sizeof(utc));
+
+  while (millis() - startMs < timeoutMs) {
+    if (getLocalTime(&utc, 250) && (utc.tm_year + 1900) >= 2024) {
+      bool ok = rtcSetUtcFromTm_safe(utc);
+      Serial.print("RTC UTC sync from NTP ");
+      Serial.println(ok ? "OK" : "FAILED");
+      return ok;
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+
+  Serial.println("RTC UTC sync timeout");
+  return false;
+}
+
+static void maybeSyncUtcAfterWifiConnected() {
+  if (rtcUtcSynced || WiFi.status() != WL_CONNECTED) return;
+  if (measurementEnabled || measurementBusy) return;
+  uint32_t nowMs = millis();
+  if (nowMs - lastNtpSyncAttemptMs < 60000UL) return;
+  lastNtpSyncAttemptMs = nowMs;
+  syncUtcTimeFromNtpToRtc(5000);
 }
 
 void printLMPRegisters_safe() {
@@ -813,6 +1128,116 @@ void fillCurrentFields(MeasurementData &data) {
   data.currentAmp = data.adcDeltaVoltage / data.rtiaOhm;
 }
 
+static void makeCvHeader(CvBinHeader &header, const CvConfig &cfg, uint64_t startedUs) {
+  memset(&header, 0, sizeof(header));
+  memcpy(header.magic, "POTCVB1", 7);
+  header.version = 1;
+  header.headerSize = sizeof(CvBinHeader);
+  header.recordSize = sizeof(CvBinRecord);
+  header.startedUs = startedUs;
+  header.zeroDacV = POTENTIAL_ZERO_V;
+  header.dacVref = DAC_VREF;
+  header.adcVref = ADC_VREF;
+  header.startV = cfg.startV;
+  header.vertex1V = cfg.vertex1V;
+  header.vertex2V = cfg.vertex2V;
+  header.finalV = cfg.finalV;
+  header.stepV = cfg.stepV;
+  header.scanRateVps = cfg.scanRateVps;
+  header.cycles = cfg.cycles;
+  header.quietMs = cfg.quietMs;
+  strncpy(header.experimentName, cfg.experimentName, sizeof(header.experimentName) - 1);
+}
+
+static void sanitizeExperimentName(const String &input, char *output, size_t outputSize) {
+  if (outputSize == 0) return;
+  size_t pos = 0;
+  String trimmed = input;
+  trimmed.trim();
+
+  for (size_t i = 0; i < trimmed.length() && pos + 1 < outputSize; i++) {
+    char c = trimmed[i];
+    bool ok = (c >= 'a' && c <= 'z') ||
+              (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') ||
+              c == '_' ||
+              c == '-';
+    if (ok) {
+      output[pos++] = c;
+    } else if (c == ' ' || c == '.') {
+      output[pos++] = '_';
+    }
+  }
+
+  output[pos] = '\0';
+}
+
+static void makeCvFilePath(char *path, size_t pathSize, uint64_t startedUs, const char *experimentName) {
+  RtcDateTime rtc;
+  if (rtcReadUtc_safe(rtc) && !rtc.oscillatorStopped) {
+    if (experimentName && experimentName[0] != '\0') {
+      snprintf(
+        path,
+        pathSize,
+        "/cv_%04u%02u%02u_%s.bin",
+        rtc.year,
+        rtc.month,
+        rtc.day,
+        experimentName
+      );
+    } else {
+      snprintf(
+        path,
+        pathSize,
+        "/cv_%04u%02u%02u_%02u%02u%02u.bin",
+        rtc.year,
+        rtc.month,
+        rtc.day,
+        rtc.hour,
+        rtc.minute,
+        rtc.second
+      );
+    }
+    return;
+  }
+
+  if (experimentName && experimentName[0] != '\0') {
+    snprintf(path, pathSize, "/cv_%llu_%s.bin", (unsigned long long)(startedUs / 1000ULL), experimentName);
+  } else {
+    snprintf(path, pathSize, "/cv_%llu.bin", (unsigned long long)(startedUs / 1000ULL));
+  }
+}
+
+static void queueCvRecord(const MeasurementData &data) {
+#if ENABLE_SD_LOGGING
+  if (!cvLogActive || data.mode != MEAS_MODE_CV || !sdRecordQueue) return;
+
+  CvBinRecord record;
+  memset(&record, 0, sizeof(record));
+  record.sampleIndex = data.sampleIndex;
+  record.direction = (int8_t)data.direction;
+  record.autoRangeAction = (uint8_t)data.autoRangeAction;
+  record.tiaCN = data.tiaCN;
+  record.timestampUs = data.timestamp_us;
+  record.periodUs = data.period_us;
+  record.potentialV = dacVoltageToPotential(data.dacSetVoltage);
+  record.dacSetV = data.dacSetVoltage;
+  record.dacExpectedV = data.dacExpectedVoltage;
+  record.dacCode = data.dacCode;
+  record.adcRaw = data.adcRaw;
+  record.adcV = data.adcVoltage;
+  record.adcDeltaV = data.adcDeltaVoltage;
+  record.currentA = data.currentAmp;
+  record.rtiaOhm = data.rtiaOhm;
+
+  if (xQueueSend(sdRecordQueue, &record, 0) != pdTRUE) {
+    sdRecordDropCount++;
+  }
+#else
+  (void)data;
+#endif
+}
+
 // ======================================================
 // Push measurement to queues
 // ======================================================
@@ -821,18 +1246,28 @@ void publishMeasurement(const MeasurementData &data) {
   lastMeasurement = data;
   hasLastMeasurement = true;
 
-  // Logger queue keeps history. Drop if full to avoid blocking measurement.
-  if (loggerQueue) {
+  bool shouldQueueSerialLog = true;
+  if (data.mode == MEAS_MODE_CV) {
+    shouldQueueSerialLog = (CV_SERIAL_LOG_EVERY > 0) &&
+                           ((data.sampleIndex % CV_SERIAL_LOG_EVERY) == 0);
+  }
+  shouldQueueSerialLog = shouldQueueSerialLog && serialDebugMode;
+
+  // Logger queue is for human diagnostics. CV still records every sample to SD,
+  // but Serial is rate-limited so it cannot steal time from long measurements.
+  if (shouldQueueSerialLog && loggerQueue) {
     if (xQueueSend(loggerQueue, &data, 0) != pdTRUE) {
       loggerDropCount++;
     }
   }
+
+  queueCvRecord(data);
 }
 
 // ======================================================
 // Single measurement point
 // ======================================================
-void measureOnePoint(MeasurementMode mode, float dacSetVoltage, SweepDirection direction, uint32_t &sampleIndex) {
+uint32_t measureOnePoint(MeasurementMode mode, float dacSetVoltage, SweepDirection direction, uint32_t &sampleIndex) {
   MeasurementData data;
 
   uint64_t t0 = esp_timer_get_time();
@@ -872,6 +1307,43 @@ void measureOnePoint(MeasurementMode mode, float dacSetVoltage, SweepDirection d
   measurementBusy = false;
 
   publishMeasurement(data);
+  return data.period_us;
+}
+
+uint32_t measureAdcAtCurrentDac(MeasurementMode mode, float dacSetVoltage, SweepDirection direction, uint32_t &sampleIndex) {
+  MeasurementData data;
+
+  uint64_t t0 = esp_timer_get_time();
+
+  measurementBusy = true;
+
+  data.mode = mode;
+  data.sampleIndex = sampleIndex++;
+  data.direction = direction;
+  data.dacSetVoltage = dacSetVoltage;
+  data.dacCode = voltageToDACCode(dacSetVoltage);
+  data.dacExpectedVoltage = dacCodeToVoltage(data.dacCode);
+  data.autoRangeAction = '-';
+
+  data.adcRaw = readAD7694Average_safe(ADC_AVG_SAMPLES);
+  data.adcVoltage = adcRawToVoltage(data.adcRaw);
+
+  char action = autoRangeUpdateAndMaybeChange(data.adcVoltage);
+  if (action != '-') {
+    data.autoRangeAction = action;
+    data.adcRaw = readAD7694Average_safe(ADC_AVG_SAMPLES);
+    data.adcVoltage = adcRawToVoltage(data.adcRaw);
+  }
+
+  fillCurrentFields(data);
+
+  data.timestamp_us = esp_timer_get_time();
+  data.period_us = (uint32_t)(data.timestamp_us - t0);
+
+  measurementBusy = false;
+
+  publishMeasurement(data);
+  return data.period_us;
 }
 
 static void runSweepMode(uint32_t &sampleIndex) {
@@ -925,6 +1397,122 @@ static void runHoldCenterMode(uint32_t &sampleIndex) {
   }
 }
 
+static bool runCvSegment(float fromV, float toV, uint32_t targetIntervalUs, uint32_t &sampleIndex) {
+  float step = fabsf(cvConfig.stepV);
+  if (step < 0.0005f) step = 0.0005f;
+
+  int sign = (toV >= fromV) ? 1 : -1;
+  SweepDirection direction = (sign > 0) ? DIR_UP : DIR_DOWN;
+  float potential = fromV;
+  float dacV = potentialToDacVoltage(potential);
+  uint32_t totalSteps = (uint32_t)ceilf(fabsf(toV - fromV) / step);
+  uint32_t currentStep = 0;
+
+  writeAD5680_safe(voltageToDACCode(dacV));
+  uint64_t nextDacUpdateUs = esp_timer_get_time() + targetIntervalUs;
+
+  // DAC updates are checked before every ADC sample. While DAC is held, ADC is
+  // sampled continuously as fast as the ADC/SPI/averaging path can complete.
+  while (measurementEnabled && !measurementStopRequested) {
+    uint64_t nowUs = esp_timer_get_time();
+
+    while (currentStep < totalSteps && nowUs >= nextDacUpdateUs) {
+      currentStep++;
+      if (currentStep >= totalSteps) {
+        potential = toV;
+      } else {
+        potential = fromV + (sign * step * currentStep);
+      }
+
+      dacV = potentialToDacVoltage(potential);
+      writeAD5680_safe(voltageToDACCode(dacV));
+      nextDacUpdateUs += targetIntervalUs;
+      nowUs = esp_timer_get_time();
+    }
+
+    measureAdcAtCurrentDac(MEAS_MODE_CV, dacV, direction, sampleIndex);
+
+    if (currentStep >= totalSteps) {
+      return true;
+    }
+
+    vTaskDelay(1);
+  }
+
+  return false;
+}
+
+static void runCvMode(uint32_t &sampleIndex) {
+  CvConfig cfg = cvConfig;
+  cvConfig.startV = clampFloat(cfg.startV, CV_MIN_POTENTIAL_V, CV_MAX_POTENTIAL_V);
+  cvConfig.vertex1V = clampFloat(cfg.vertex1V, CV_MIN_POTENTIAL_V, CV_MAX_POTENTIAL_V);
+  cvConfig.vertex2V = clampFloat(cfg.vertex2V, CV_MIN_POTENTIAL_V, CV_MAX_POTENTIAL_V);
+  cvConfig.finalV = clampFloat(cfg.finalV, CV_MIN_POTENTIAL_V, CV_MAX_POTENTIAL_V);
+  cvConfig.stepV = clampFloat(fabsf(cfg.stepV), 0.0005f, 0.25f);
+  cvConfig.scanRateVps = clampFloat(fabsf(cfg.scanRateVps), 0.001f, 10.0f);
+  if (cvConfig.cycles == 0) cvConfig.cycles = 1;
+  if (cvConfig.cycles > 100) cvConfig.cycles = 100;
+
+#if ENABLE_SD_LOGGING
+  if (!initSdCard()) {
+    Serial.println("CV aborted: SD_MMC is not available for .bin logging");
+    requestMeasurementStop();
+    return;
+  }
+#endif
+
+  uint64_t startedUs = esp_timer_get_time();
+  makeCvHeader(activeCvHeader, cvConfig, startedUs);
+  makeCvFilePath(activeCvFilePath, sizeof(activeCvFilePath), startedUs, cvConfig.experimentName);
+  sdRecordWriteCount = 0;
+  sdRecordDropCount = 0;
+  sdWriteErrorCount = 0;
+  cvLogActive = true;
+
+  Serial.print("CV started file=");
+  Serial.println(activeCvFilePath);
+
+  writeAD5680_safe(voltageToDACCode(potentialToDacVoltage(cvConfig.startV)));
+  if (cvConfig.quietMs > 0) {
+    uint32_t waitedMs = 0;
+    while (measurementEnabled && !measurementStopRequested && waitedMs < cvConfig.quietMs) {
+      vTaskDelay(pdMS_TO_TICKS(20));
+      waitedMs += 20;
+    }
+  }
+
+  uint32_t targetIntervalUs = (uint32_t)((cvConfig.stepV / cvConfig.scanRateVps) * 1000000.0f);
+  if (targetIntervalUs < 1000) targetIntervalUs = 1000;
+
+  bool cvCompleted = true;
+  for (uint16_t cycle = 0; cycle < cvConfig.cycles && measurementEnabled && !measurementStopRequested; cycle++) {
+    Serial.print("CV cycle ");
+    Serial.print(cycle + 1);
+    Serial.print("/");
+    Serial.println(cvConfig.cycles);
+
+    if (!runCvSegment(cvConfig.startV, cvConfig.vertex1V, targetIntervalUs, sampleIndex)) {
+      cvCompleted = false;
+      break;
+    }
+    if (!runCvSegment(cvConfig.vertex1V, cvConfig.vertex2V, targetIntervalUs, sampleIndex)) {
+      cvCompleted = false;
+      break;
+    }
+    if (!runCvSegment(cvConfig.vertex2V, cvConfig.finalV, targetIntervalUs, sampleIndex)) {
+      cvCompleted = false;
+      break;
+    }
+  }
+
+  cvLogActive = false;
+  measurementStopRequested = true;
+  measurementEnabled = false;
+  setMeasurementPriority(false);
+
+  Serial.println(cvCompleted ? "CV completed" : "CV stopped before completion");
+}
+
 // ======================================================
 // Tasks
 // ======================================================
@@ -964,6 +1552,8 @@ void measurementTask(void *pvParameters) {
 
       if (mode == MEAS_MODE_HOLD_CENTER) {
         runHoldCenterMode(sampleIndex);
+      } else if (mode == MEAS_MODE_CV) {
+        runCvMode(sampleIndex);
       } else {
         runSweepMode(sampleIndex);
       }
@@ -1611,6 +2201,8 @@ void handleSerialCommand(char c) {
     Serial.print("measurementPriorityIsHigh=");
     Serial.println(measurementPriorityIsHigh ? "true" : "false");
     printMeasurementMode();
+    Serial.print("serialDebugMode=");
+    Serial.println(serialDebugMode ? "true" : "false");
     Serial.print("loggerDropCount=");
     Serial.println(loggerDropCount);
     Serial.print("autoRange=");
@@ -1644,9 +2236,12 @@ void handleSerialCommand(char c) {
   else if (c == '2') {
     selectMeasurementModeFromSerial(MEAS_MODE_HOLD_CENTER);
   }
+  else if (c == '3') {
+    selectMeasurementModeFromSerial(MEAS_MODE_CV);
+  }
   else if (c == 'm' || c == 'M') {
     printMeasurementMode();
-    Serial.println("Modes: 1=SWEEP, 2=HOLD_CENTER");
+    Serial.println("Modes: 1=SWEEP, 2=HOLD_CENTER, 3=CV");
   }
 }
 
@@ -2269,6 +2864,8 @@ static String latestMeasurementJson() {
   json += String(data.sampleIndex);
   json += F(",\"dac_set_v\":");
   json += String(data.dacSetVoltage, 3);
+  json += F(",\"potential_v\":");
+  json += String(dacVoltageToPotential(data.dacSetVoltage), 3);
   json += F(",\"dac_code\":");
   json += String(data.dacCode);
   json += F(",\"dac_expected_v\":");
@@ -2298,6 +2895,34 @@ static String latestMeasurementJson() {
   return json;
 }
 
+static String cvConfigJson() {
+  CvConfig cfg = cvConfig;
+  String json = F("{\"experiment_name\":\"");
+  json += jsonEscape(String(cfg.experimentName));
+  json += F("\",\"start_v\":");
+  json += String(cfg.startV, 4);
+  json += F(",\"vertex1_v\":");
+  json += String(cfg.vertex1V, 4);
+  json += F(",\"vertex2_v\":");
+  json += String(cfg.vertex2V, 4);
+  json += F(",\"final_v\":");
+  json += String(cfg.finalV, 4);
+  json += F(",\"step_v\":");
+  json += String(cfg.stepV, 4);
+  json += F(",\"scan_rate_vps\":");
+  json += String(cfg.scanRateVps, 4);
+  json += F(",\"cycles\":");
+  json += String(cfg.cycles);
+  json += F(",\"quiet_ms\":");
+  json += String(cfg.quietMs);
+  json += F(",\"min_v\":");
+  json += String(CV_MIN_POTENTIAL_V, 3);
+  json += F(",\"max_v\":");
+  json += String(CV_MAX_POTENTIAL_V, 3);
+  json += F("}");
+  return json;
+}
+
 static String measurementStatusJson() {
   String json = F("{\"running\":");
   json += measurementEnabled ? F("true") : F("false");
@@ -2307,7 +2932,27 @@ static String measurementStatusJson() {
   json += measurementStopRequested ? F("true") : F("false");
   json += F(",\"mode\":\"");
   json += measurementModeToText(getMeasurementMode());
-  json += F("\",\"modes\":[\"SWEEP\",\"HOLD_CENTER\"]");
+  json += F("\",\"modes\":[\"SWEEP\",\"HOLD_CENTER\",\"CV\"]");
+  json += F(",\"cv_config\":");
+  json += cvConfigJson();
+  json += F(",\"sd_mounted\":");
+  json += sdMounted ? F("true") : F("false");
+  json += F(",\"sd_log_file_open\":");
+  json += sdLogFileOpen ? F("true") : F("false");
+  json += F(",\"cv_log_active\":");
+  json += cvLogActive ? F("true") : F("false");
+  json += F(",\"cv_file\":\"");
+  json += jsonEscape(String(activeCvFilePath));
+  json += F("\",\"sd_records_written\":");
+  json += String(sdRecordWriteCount);
+  json += F(",\"sd_records_dropped\":");
+  json += String(sdRecordDropCount);
+  json += F(",\"sd_write_errors\":");
+  json += String(sdWriteErrorCount);
+  json += F(",\"rtc_available\":");
+  json += rtcAvailable ? F("true") : F("false");
+  json += F(",\"rtc_utc_synced\":");
+  json += rtcUtcSynced ? F("true") : F("false");
   json += F(",\"latest\":");
   json += latestMeasurementJson();
   json += F("}");
@@ -2325,13 +2970,91 @@ static void handleMeasurementModeApi() {
   wifiServer.send(200, "application/json", measurementStatusJson());
 }
 
+static float webArgFloat(const char *name, float fallback) {
+  if (!wifiServer.hasArg(name)) return fallback;
+  String value = wifiServer.arg(name);
+  value.trim();
+  if (value.length() == 0) return fallback;
+  return value.toFloat();
+}
+
+static uint32_t webArgUInt(const char *name, uint32_t fallback) {
+  if (!wifiServer.hasArg(name)) return fallback;
+  String value = wifiServer.arg(name);
+  value.trim();
+  if (value.length() == 0) return fallback;
+  return (uint32_t)value.toInt();
+}
+
+static bool applyCvConfigFromRequest() {
+  if (measurementEnabled || measurementBusy) {
+    return false;
+  }
+
+  CvConfig next = cvConfig;
+  if (wifiServer.hasArg("experiment_name")) {
+    sanitizeExperimentName(wifiServer.arg("experiment_name"), next.experimentName, sizeof(next.experimentName));
+  }
+  next.startV = webArgFloat("start_v", next.startV);
+  next.vertex1V = webArgFloat("vertex1_v", next.vertex1V);
+  next.vertex2V = webArgFloat("vertex2_v", next.vertex2V);
+  next.finalV = webArgFloat("final_v", next.finalV);
+  next.stepV = webArgFloat("step_v", next.stepV);
+  next.scanRateVps = webArgFloat("scan_rate_vps", next.scanRateVps);
+  next.cycles = (uint16_t)webArgUInt("cycles", next.cycles);
+  next.quietMs = webArgUInt("quiet_ms", next.quietMs);
+
+  next.startV = clampFloat(next.startV, CV_MIN_POTENTIAL_V, CV_MAX_POTENTIAL_V);
+  next.vertex1V = clampFloat(next.vertex1V, CV_MIN_POTENTIAL_V, CV_MAX_POTENTIAL_V);
+  next.vertex2V = clampFloat(next.vertex2V, CV_MIN_POTENTIAL_V, CV_MAX_POTENTIAL_V);
+  next.finalV = clampFloat(next.finalV, CV_MIN_POTENTIAL_V, CV_MAX_POTENTIAL_V);
+  next.stepV = clampFloat(fabsf(next.stepV), 0.0005f, 0.25f);
+  next.scanRateVps = clampFloat(fabsf(next.scanRateVps), 0.001f, 10.0f);
+  if (next.cycles == 0) next.cycles = 1;
+  if (next.cycles > 100) next.cycles = 100;
+  if (next.quietMs > 600000UL) next.quietMs = 600000UL;
+
+  cvConfig = next;
+  return true;
+}
+
+static void handleCvConfigApi() {
+  if (!applyCvConfigFromRequest()) {
+    wifiServer.send(409, "application/json", F("{\"ok\":false,\"message\":\"Stop measurement before changing CV parameters\"}"));
+    return;
+  }
+
+  currentMeasurementMode = MEAS_MODE_CV;
+  wifiServer.send(200, "application/json", measurementStatusJson());
+}
+
 static void handleMeasurementStartApi() {
+  if (wifiServer.hasArg("start_v") || wifiServer.hasArg("vertex1_v") ||
+      wifiServer.hasArg("vertex2_v") || wifiServer.hasArg("final_v") ||
+      wifiServer.hasArg("step_v") || wifiServer.hasArg("scan_rate_vps") ||
+      wifiServer.hasArg("cycles") || wifiServer.hasArg("quiet_ms") ||
+      wifiServer.hasArg("experiment_name")) {
+    if (!applyCvConfigFromRequest()) {
+      wifiServer.send(409, "application/json", F("{\"ok\":false,\"message\":\"Stop measurement before changing CV parameters\"}"));
+      return;
+    }
+  }
+
   if (wifiServer.hasArg("mode")) {
     MeasurementMode requested = parseMeasurementMode(wifiServer.arg("mode"), getMeasurementMode());
     if (!setMeasurementMode(requested)) {
       wifiServer.send(409, "application/json", F("{\"ok\":false,\"message\":\"Stop measurement before changing mode\"}"));
       return;
     }
+  }
+
+  if (getMeasurementMode() == MEAS_MODE_CV && WiFi.status() == WL_CONNECTED && !rtcUtcSynced) {
+    syncUtcTimeFromNtpToRtc(5000);
+  }
+
+  if (getMeasurementMode() == MEAS_MODE_CV && !initSdCard()) {
+    wifiServer.send(503, "application/json", F("{\"ok\":false,\"message\":\"SD card mount failed; CV logging requires SD\"}"));
+    return;
   }
 
   if (!measurementEnabled) {
@@ -2349,6 +3072,238 @@ static void handleMeasurementStopApi() {
   digitalWrite(LED_BUILTIN_PIN, HIGH);
   refreshRunButtonFromOptionTask();
   wifiServer.send(200, "application/json", measurementStatusJson());
+}
+
+static bool isSafeCvFilePath(const String &path) {
+  return path.startsWith("/cv_") && path.endsWith(".bin") && path.indexOf("..") < 0;
+}
+
+static String cvFilesJson() {
+  String json = F("{\"files\":[");
+#if ENABLE_SD_LOGGING
+  if (!sdMounted && !measurementEnabled && !measurementBusy) {
+    initSdCard();
+  }
+  if (sdMounted) {
+    File root = SD_MMC.open("/");
+    bool first = true;
+    if (root) {
+      File file = root.openNextFile();
+      while (file) {
+        String name = file.name();
+        if (!name.startsWith("/")) name = "/" + name;
+        if (!file.isDirectory() && isSafeCvFilePath(name)) {
+          if (!first) json += ',';
+          first = false;
+          json += F("{\"name\":\"");
+          json += jsonEscape(name);
+          json += F("\",\"size\":");
+          json += String((uint32_t)file.size());
+          json += F("}");
+        }
+        file = root.openNextFile();
+      }
+      root.close();
+    }
+  }
+#endif
+  json += F("]}");
+  return json;
+}
+
+static void handleCvFilesApi() {
+  wifiServer.send(200, "application/json", cvFilesJson());
+}
+
+static void handleCvDownloadCsvApi() {
+#if ENABLE_SD_LOGGING
+  if (measurementEnabled || measurementBusy || cvLogActive || sdLogFileOpen) {
+    wifiServer.send(409, "application/json", F("{\"ok\":false,\"message\":\"Stop measurement before downloading CV data\"}"));
+    return;
+  }
+
+  if (!sdMounted) {
+    if (!initSdCard()) {
+      wifiServer.send(503, "application/json", F("{\"ok\":false,\"message\":\"SD card is not mounted\"}"));
+      return;
+    }
+  }
+
+  String path = wifiServer.arg("file");
+  if (!isSafeCvFilePath(path)) {
+    wifiServer.send(400, "application/json", F("{\"ok\":false,\"message\":\"Invalid CV file path\"}"));
+    return;
+  }
+
+  File file = SD_MMC.open(path, FILE_READ);
+  if (!file) {
+    wifiServer.send(404, "application/json", F("{\"ok\":false,\"message\":\"CV file not found\"}"));
+    return;
+  }
+
+  CvBinHeader header;
+  if (file.read((uint8_t *)&header, sizeof(header)) != sizeof(header) ||
+      memcmp(header.magic, "POTCVB1", 7) != 0 ||
+      header.recordSize != sizeof(CvBinRecord)) {
+    file.close();
+    wifiServer.send(400, "application/json", F("{\"ok\":false,\"message\":\"Invalid CV binary file\"}"));
+    return;
+  }
+
+  String downloadName = path.substring(1);
+  downloadName.replace(".bin", ".csv");
+  wifiServer.sendHeader("Content-Disposition", "attachment; filename=\"" + downloadName + "\"");
+  wifiServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  wifiServer.send(200, "text/csv", "");
+
+  wifiServer.sendContent(F("experiment_name,start_v,vertex1_v,vertex2_v,final_v,step_v,scan_rate_vps,cycles,quiet_ms\n"));
+  wifiServer.sendContent(String(header.experimentName) + "," +
+                         String(header.startV, 6) + "," +
+                         String(header.vertex1V, 6) + "," + String(header.vertex2V, 6) + "," +
+                         String(header.finalV, 6) + "," + String(header.stepV, 6) + "," +
+                         String(header.scanRateVps, 6) + "," + String(header.cycles) + "," +
+                         String(header.quietMs) + "\n\n");
+  wifiServer.sendContent(F("sample_index,period_us,potential_v,current_uA\n"));
+
+  CvBinRecord record;
+  char line[128];
+  while (file.read((uint8_t *)&record, sizeof(record)) == sizeof(record)) {
+    snprintf(
+      line,
+      sizeof(line),
+      "%lu,%lu,%.6f,%.6f\n",
+      (unsigned long)record.sampleIndex,
+      (unsigned long)record.periodUs,
+      record.potentialV,
+      record.currentA * 1000000.0f
+    );
+    wifiServer.sendContent(line);
+    vTaskDelay(1);
+  }
+
+  file.close();
+  wifiServer.sendContent("");
+#else
+  wifiServer.send(503, "application/json", F("{\"ok\":false,\"message\":\"SD logging disabled\"}"));
+#endif
+}
+
+static void handleCvDownloadBinApi() {
+#if ENABLE_SD_LOGGING
+  if (measurementEnabled || measurementBusy || cvLogActive || sdLogFileOpen) {
+    wifiServer.send(409, "application/json", F("{\"ok\":false,\"message\":\"Stop measurement before downloading CV data\"}"));
+    return;
+  }
+
+  if (!sdMounted) {
+    if (!initSdCard()) {
+      wifiServer.send(503, "application/json", F("{\"ok\":false,\"message\":\"SD card is not mounted\"}"));
+      return;
+    }
+  }
+
+  String path = wifiServer.arg("file");
+  if (!isSafeCvFilePath(path)) {
+    wifiServer.send(400, "application/json", F("{\"ok\":false,\"message\":\"Invalid CV file path\"}"));
+    return;
+  }
+
+  File file = SD_MMC.open(path, FILE_READ);
+  if (!file) {
+    wifiServer.send(404, "application/json", F("{\"ok\":false,\"message\":\"CV file not found\"}"));
+    return;
+  }
+
+  String downloadName = path.substring(1);
+  wifiServer.sendHeader("Content-Disposition", "attachment; filename=\"" + downloadName + "\"");
+  wifiServer.streamFile(file, "application/octet-stream");
+  file.close();
+#else
+  wifiServer.send(503, "application/json", F("{\"ok\":false,\"message\":\"SD logging disabled\"}"));
+#endif
+}
+
+static void handleCvDeleteApi() {
+#if ENABLE_SD_LOGGING
+  if (measurementEnabled || measurementBusy || cvLogActive || sdLogFileOpen) {
+    wifiServer.send(409, "application/json", F("{\"ok\":false,\"message\":\"Stop measurement before deleting CV data\"}"));
+    return;
+  }
+
+  if (!sdMounted) {
+    if (!initSdCard()) {
+      wifiServer.send(503, "application/json", F("{\"ok\":false,\"message\":\"SD card is not mounted\"}"));
+      return;
+    }
+  }
+
+  String path = wifiServer.arg("file");
+  if (!isSafeCvFilePath(path)) {
+    wifiServer.send(400, "application/json", F("{\"ok\":false,\"message\":\"Invalid CV file path\"}"));
+    return;
+  }
+
+  if (!SD_MMC.exists(path)) {
+    wifiServer.send(404, "application/json", F("{\"ok\":false,\"message\":\"CV file not found\"}"));
+    return;
+  }
+
+  if (!SD_MMC.remove(path)) {
+    wifiServer.send(500, "application/json", F("{\"ok\":false,\"message\":\"Delete failed\"}"));
+    return;
+  }
+
+  wifiServer.send(200, "application/json", F("{\"ok\":true,\"message\":\"CV file deleted\"}"));
+#else
+  wifiServer.send(503, "application/json", F("{\"ok\":false,\"message\":\"SD logging disabled\"}"));
+#endif
+}
+
+static void startWifiWebServer() {
+  if (wifiServerStarted) return;
+
+  wifiServer.on("/", HTTP_GET, []() { sendWifiPortalIndex(); });
+  wifiServer.on("/wifi_index.html", HTTP_GET, []() { sendWifiPortalIndex(); });
+  wifiServer.on("/generate_204", HTTP_GET, []() { wifiServer.sendHeader("Location", "/", true); wifiServer.send(302, "text/plain", ""); });
+  wifiServer.on("/fwlink", HTTP_GET, []() { wifiServer.sendHeader("Location", "/", true); wifiServer.send(302, "text/plain", ""); });
+
+  wifiServer.on("/api/status", HTTP_GET, []() { wifiServer.send(200, "application/json", wifiStatusJson()); });
+  wifiServer.on("/api/networks", HTTP_GET, []() { wifiServer.send(200, "application/json", wifiNetworksJson()); });
+  wifiServer.on("/api/scan", HTTP_GET, []() { wifiServer.send(200, "application/json", wifiScanJson()); });
+  wifiServer.on("/api/measurement/status", HTTP_GET, []() { wifiServer.send(200, "application/json", measurementStatusJson()); });
+  wifiServer.on("/api/measurement/mode", HTTP_POST, []() { handleMeasurementModeApi(); });
+  wifiServer.on("/api/measurement/cv", HTTP_POST, []() { handleCvConfigApi(); });
+  wifiServer.on("/api/measurement/start", HTTP_POST, []() { handleMeasurementStartApi(); });
+  wifiServer.on("/api/measurement/stop", HTTP_POST, []() { handleMeasurementStopApi(); });
+  wifiServer.on("/api/cv/files", HTTP_GET, []() { handleCvFilesApi(); });
+  wifiServer.on("/api/cv/download", HTTP_GET, []() { handleCvDownloadCsvApi(); });
+  wifiServer.on("/api/cv/download-bin", HTTP_GET, []() { handleCvDownloadBinApi(); });
+  wifiServer.on("/api/cv/delete", HTTP_POST, []() { handleCvDeleteApi(); });
+  wifiServer.on("/api/save", HTTP_POST, []() { handleWifiSave(); });
+  wifiServer.on("/api/delete", HTTP_POST, []() { handleWifiDelete(); });
+  wifiServer.on("/api/connect", HTTP_POST, []() {
+    wifiConnectRequested = true;
+    wifiServer.send(200, "application/json", F("{\"ok\":true,\"message\":\"Connecting...\"}"));
+  });
+
+  // Backward-compatible routes for old forms/tools.
+  wifiServer.on("/save", HTTP_POST, []() { handleWifiSave(); });
+  wifiServer.on("/delete", HTTP_GET, []() { handleWifiDelete(); });
+  wifiServer.on("/connect", HTTP_GET, []() {
+    wifiConnectRequested = true;
+    wifiServer.sendHeader("Location", "/", true);
+    wifiServer.send(302, "text/plain", "");
+  });
+  wifiServer.on("/scan", HTTP_GET, []() { wifiServer.send(200, "application/json", wifiScanJson()); });
+
+  wifiServer.onNotFound([]() {
+    wifiServer.sendHeader("Location", "/", true);
+    wifiServer.send(302, "text/plain", "");
+  });
+
+  wifiServer.begin();
+  wifiServerStarted = true;
+  Serial.println("WiFi web server started.");
 }
 
 static void startWifiPortal() {
@@ -2387,42 +3342,7 @@ static void startWifiPortal() {
   IPAddress apIP = WiFi.softAPIP();
   wifiDns.start(53, "*", apIP);
 
-  wifiServer.on("/", HTTP_GET, []() { sendWifiPortalIndex(); });
-  wifiServer.on("/wifi_index.html", HTTP_GET, []() { sendWifiPortalIndex(); });
-  wifiServer.on("/generate_204", HTTP_GET, []() { wifiServer.sendHeader("Location", "/", true); wifiServer.send(302, "text/plain", ""); });
-  wifiServer.on("/fwlink", HTTP_GET, []() { wifiServer.sendHeader("Location", "/", true); wifiServer.send(302, "text/plain", ""); });
-
-  wifiServer.on("/api/status", HTTP_GET, []() { wifiServer.send(200, "application/json", wifiStatusJson()); });
-  wifiServer.on("/api/networks", HTTP_GET, []() { wifiServer.send(200, "application/json", wifiNetworksJson()); });
-  wifiServer.on("/api/scan", HTTP_GET, []() { wifiServer.send(200, "application/json", wifiScanJson()); });
-  wifiServer.on("/api/measurement/status", HTTP_GET, []() { wifiServer.send(200, "application/json", measurementStatusJson()); });
-  wifiServer.on("/api/measurement/mode", HTTP_POST, []() { handleMeasurementModeApi(); });
-  wifiServer.on("/api/measurement/start", HTTP_POST, []() { handleMeasurementStartApi(); });
-  wifiServer.on("/api/measurement/stop", HTTP_POST, []() { handleMeasurementStopApi(); });
-  wifiServer.on("/api/save", HTTP_POST, []() { handleWifiSave(); });
-  wifiServer.on("/api/delete", HTTP_POST, []() { handleWifiDelete(); });
-  wifiServer.on("/api/connect", HTTP_POST, []() {
-    wifiConnectRequested = true;
-    wifiServer.send(200, "application/json", F("{\"ok\":true,\"message\":\"Connecting...\"}"));
-  });
-
-  // Backward-compatible routes for old forms/tools.
-  wifiServer.on("/save", HTTP_POST, []() { handleWifiSave(); });
-  wifiServer.on("/delete", HTTP_GET, []() { handleWifiDelete(); });
-  wifiServer.on("/connect", HTTP_GET, []() {
-    wifiConnectRequested = true;
-    wifiServer.sendHeader("Location", "/", true);
-    wifiServer.send(302, "text/plain", "");
-  });
-  wifiServer.on("/scan", HTTP_GET, []() { wifiServer.send(200, "application/json", wifiScanJson()); });
-
-  wifiServer.onNotFound([]() {
-    wifiServer.sendHeader("Location", "/", true);
-    wifiServer.send(302, "text/plain", "");
-  });
-
-  wifiServer.begin();
-  wifiServerStarted = true;
+  startWifiWebServer();
 
   Serial.print("WiFi AP portal ");
   Serial.print(apOK ? "started" : "failed");
@@ -2444,8 +3364,14 @@ static void stopWifiPortalIfConnected() {
 
 static void wifiManagerBeginFromOptionTask() {
   Serial.println("WiFi manager: default first, then fast-scan NVS credentials, then AP portal.");
-  if (connectDefaultWifiFirst()) return;
-  if (connectStoredWifiFast()) return;
+  if (connectDefaultWifiFirst()) {
+    startWifiWebServer();
+    return;
+  }
+  if (connectStoredWifiFast()) {
+    startWifiWebServer();
+    return;
+  }
   startWifiPortal();
 }
 
@@ -2456,7 +3382,9 @@ static void wifiManagerLoop() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
+    startWifiWebServer();
     stopWifiPortalIfConnected();
+    maybeSyncUtcAfterWifiConnected();
     return;
   }
 
@@ -2470,12 +3398,122 @@ static void wifiManagerLoop() {
   }
 }
 
+static bool initSdCard() {
+#if ENABLE_SD_LOGGING
+  if (sdMounted) return true;
+
+  SD_MMC.setPins(SD_CLK, SD_CMD, SD_D0, SD_D1, SD_D2, SD_D3);
+  if (!SD_MMC.begin("/sdcard", false)) {
+    sdMounted = false;
+    Serial.println("SD_MMC 4-bit mount failed. CV .bin logging disabled.");
+    return false;
+  }
+
+  sdMounted = true;
+  Serial.print("SD_MMC 4-bit mounted OK, size MB=");
+  Serial.println((uint32_t)(SD_MMC.cardSize() / (1024ULL * 1024ULL)));
+  return true;
+#else
+  return false;
+#endif
+}
+
+void sdWriterTask(void *pvParameters) {
+  (void)pvParameters;
+
+#if ENABLE_SD_LOGGING
+  File file;
+  bool headerWritten = false;
+  uint32_t lastFlushMs = millis();
+  CvBinRecord batch[SD_WRITE_BATCH_LIMIT];
+
+  Serial.println("SDWriterTask started on Core " + String(xPortGetCoreID()));
+
+  for (;;) {
+    if (!sdMounted) {
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      continue;
+    }
+
+    if (!cvLogActive && !file) {
+      vTaskDelay(pdMS_TO_TICKS(250));
+      continue;
+    }
+
+    if (cvLogActive && !file) {
+      file = SD_MMC.open(activeCvFilePath, FILE_WRITE);
+      headerWritten = false;
+      if (!file) {
+        sdWriteErrorCount++;
+        Serial.print("CV log open failed: ");
+        Serial.println(activeCvFilePath);
+        vTaskDelay(pdMS_TO_TICKS(200));
+        continue;
+      }
+
+      size_t written = file.write((const uint8_t *)&activeCvHeader, sizeof(activeCvHeader));
+      headerWritten = (written == sizeof(activeCvHeader));
+      sdLogFileOpen = headerWritten;
+      if (!headerWritten) {
+        sdWriteErrorCount++;
+        file.close();
+        sdLogFileOpen = false;
+        vTaskDelay(pdMS_TO_TICKS(200));
+        continue;
+      }
+
+      vTaskDelay(1);
+    }
+
+    if (file && headerWritten) {
+      uint8_t recordsWrittenThisPass = 0;
+      TickType_t waitTicks = pdMS_TO_TICKS(20);
+
+      while (recordsWrittenThisPass < SD_WRITE_BATCH_LIMIT &&
+             xQueueReceive(sdRecordQueue, &batch[recordsWrittenThisPass], waitTicks) == pdTRUE) {
+        recordsWrittenThisPass++;
+        waitTicks = 0;
+      }
+
+      if (recordsWrittenThisPass > 0) {
+        size_t bytesToWrite = recordsWrittenThisPass * sizeof(CvBinRecord);
+        size_t written = file.write((const uint8_t *)batch, bytesToWrite);
+        if (written == bytesToWrite) {
+          sdRecordWriteCount += recordsWrittenThisPass;
+        } else {
+          sdWriteErrorCount++;
+        }
+      }
+    }
+
+    uint32_t nowMs = millis();
+    if (file && nowMs - lastFlushMs >= SD_FLUSH_INTERVAL_MS) {
+      file.flush();
+      lastFlushMs = nowMs;
+    }
+
+    if (file && !cvLogActive && uxQueueMessagesWaiting(sdRecordQueue) == 0) {
+      file.flush();
+      file.close();
+      sdLogFileOpen = false;
+      Serial.print("CV log closed: ");
+      Serial.print(activeCvFilePath);
+      Serial.print(" records=");
+      Serial.println(sdRecordWriteCount);
+    }
+
+    vTaskDelay(1);
+  }
+#else
+  vTaskDelete(nullptr);
+#endif
+}
+
 
 
 void optionTask(void *pvParameters) {
   Serial.println("OptionTask started on Core " + String(xPortGetCoreID()) + " (low priority, Serial/logger/options/WiFi manager)");
-  Serial.println();
-  Serial.println("mode,direction,DAC_set_V,DAC_code,DAC_expected_V,ADC_raw,ADC_V,ADC_delta_V,current_A,RTIA_ohm,TIACN,AutoRange,timestamp_us,period_us");
+  updateSerialDebugMode();
 
   MeasurementData data;
   uint32_t lastI2CStatusMs = 0;
@@ -2484,8 +3522,11 @@ void optionTask(void *pvParameters) {
   requestTftFullRefresh();
 
   while (true) {
+    updateSerialDebugMode();
+
     // 1) Serial commands
     while (Serial.available()) {
+      updateSerialDebugMode(true);
       handleSerialCommand((char)Serial.read());
     }
 
@@ -2494,10 +3535,20 @@ void optionTask(void *pvParameters) {
 #endif
 
     // 2) Logger: drain a limited number per loop to avoid CPU0 WDT / Serial blocking too long.
-    uint8_t printed = 0;
-    while (printed < 4 && xQueueReceive(loggerQueue, &data, 0) == pdTRUE) {
-      printMeasurementCsv(data);
-      printed++;
+    if (serialDebugMode) {
+      if (!serialCsvHeaderPrinted) {
+        Serial.println("mode,direction,DAC_set_V,DAC_code,DAC_expected_V,ADC_raw,ADC_V,ADC_delta_V,current_A,RTIA_ohm,TIACN,AutoRange,timestamp_us,period_us");
+        serialCsvHeaderPrinted = true;
+      }
+
+      uint8_t printed = 0;
+      while (printed < 4 && xQueueReceive(loggerQueue, &data, 0) == pdTRUE) {
+        printMeasurementCsv(data);
+        printed++;
+      }
+    } else if (loggerQueue) {
+      xQueueReset(loggerQueue);
+      serialCsvHeaderPrinted = false;
     }
 
 #if ENABLE_I2C_MONITOR_TASK
@@ -2531,6 +3582,9 @@ void setup() {
   Serial.println();
   Serial.println("smart-ec Rev.2.0 Multitask Test");
   Serial.println("DAC AD5680 + ADC AD7694 + LMP91000 + TFT ILI9488");
+  esp_reset_reason_t resetReason = esp_reset_reason();
+  Serial.print("Reset reason: ");
+  Serial.println(resetReasonToText(resetReason));
   Serial.println();
 
   pinMode(LED_BUILTIN_PIN, OUTPUT);
@@ -2543,8 +3597,9 @@ void setup() {
   i2cMutex = xSemaphoreCreateMutex();
 
   loggerQueue = xQueueCreate(256, sizeof(MeasurementData));
+  sdRecordQueue = xQueueCreate(1024, sizeof(CvBinRecord));
 
-  if (!spiMutex || !i2cMutex || !loggerQueue) {
+  if (!spiMutex || !i2cMutex || !loggerQueue || !sdRecordQueue) {
     Serial.println("FreeRTOS object create failed.");
     while (true) delay(1000);
   }
@@ -2576,6 +3631,9 @@ void setup() {
   // ------------------------------
   Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(100000);
+  rtcProbe_safe();
+  Serial.print("RTC PCF85363A: ");
+  Serial.println(rtcAvailable ? "found" : "not found");
 
   // ------------------------------
   // Shared Hardware SPI init for DAC/ADC
@@ -2659,6 +3717,7 @@ void setup() {
   Serial.println("  s = stop measurement");
   Serial.println("  1 = select SWEEP mode");
   Serial.println("  2 = select HOLD_CENTER mode (2.048V repeated)");
+  Serial.println("  3 = select CV mode (web parameters)");
   Serial.println("  m = print selected measurement mode");
   Serial.println("  p = print LMP91000 registers");
   Serial.println("  g = set TIA range back to 35k");
@@ -2677,6 +3736,16 @@ void setup() {
   // ------------------------------
   // Create tasks
   // ------------------------------
+  xTaskCreatePinnedToCore(
+    sdWriterTask,
+    "SDWriterTask",
+    8192,
+    nullptr,
+    OPTION_PRIORITY,
+    &sdWriterTaskHandle,
+    0
+  );
+
   xTaskCreatePinnedToCore(
     measurementTask,
     "MeasurementTask",
