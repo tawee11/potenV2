@@ -61,6 +61,7 @@
           <button class="ghost" onclick="setMode('SWEEP')">Sweep</button>
           <button class="ghost" onclick="setMode('HOLD_CENTER')">Hold Center</button>
           <button class="ghost" onclick="setMode('CV')">CV</button>
+          <button class="ghost" onclick="setMode('SWV')">SWV</button>
           <button class="primary" onclick="startMeasurement()">Start</button>
           <button class="danger" onclick="stopMeasurement()">Stop</button>
         </div>
@@ -80,9 +81,22 @@
         </div>
         <div class="actions"><button class="primary" type="submit">Start CV</button><button class="ghost" type="button" onclick="saveCvConfig()">Save CV Params</button></div>
       </form>
+      <form id="swvForm" style="margin-top:14px">
+        <h3 style="margin:0 0 8px">SWV</h3>
+        <div class="field"><label class="label" for="swvExperiment">Experiment name</label><input id="swvExperiment" name="experiment_name" type="text" maxlength="31" placeholder="empty = timestamp filename"></div>
+        <div class="grid">
+          <div class="field"><label class="label" for="swvStart">Start V</label><input id="swvStart" name="start_v" type="number" step="0.001" min="-2.048" max="2.048" value="-0.500"></div>
+          <div class="field"><label class="label" for="swvEnd">End V</label><input id="swvEnd" name="end_v" type="number" step="0.001" min="-2.048" max="2.048" value="0.500"></div>
+          <div class="field"><label class="label" for="swvStep">Step V</label><input id="swvStep" name="step_v" type="number" step="0.001" min="0.001" max="0.250" value="0.005"></div>
+          <div class="field"><label class="label" for="swvAmplitude">Amplitude V</label><input id="swvAmplitude" name="amplitude_v" type="number" step="0.001" min="0.001" max="1.000" value="0.025"></div>
+          <div class="field"><label class="label" for="swvFrequency">Frequency Hz</label><input id="swvFrequency" name="frequency_hz" type="number" step="0.1" min="0.1" max="500" value="25.0"></div>
+          <div class="field"><label class="label" for="swvQuiet">Quiet ms</label><input id="swvQuiet" name="quiet_ms" type="number" step="100" min="0" max="600000" value="0"></div>
+        </div>
+        <div class="actions"><button class="primary" type="submit">Start SWV</button><button class="ghost" type="button" onclick="saveSwvConfig()">Save SWV Params</button></div>
+      </form>
       <div style="margin-top:14px">
         <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap">
-          <h3 style="margin:0">CV Files</h3>
+          <h3 style="margin:0">Measurement Files</h3>
           <button class="ghost" onclick="loadCvFiles()">Refresh Files</button>
         </div>
         <div id="cvFiles" class="list" style="margin-top:10px"><p class="small">No file list loaded.</p></div>
@@ -129,6 +143,9 @@ async function loadMeasurement(){
     if(m.cv_config && !$('cvForm').dataset.dirty){
       $('cvExperiment').value=m.cv_config.experiment_name||''; $('cvStart').value=Number(m.cv_config.start_v).toFixed(3); $('cvVertex1').value=Number(m.cv_config.vertex1_v).toFixed(3); $('cvVertex2').value=Number(m.cv_config.vertex2_v).toFixed(3); $('cvFinal').value=Number(m.cv_config.final_v).toFixed(3); $('cvStep').value=Number(m.cv_config.step_v).toFixed(3); $('cvScanRate').value=Number(m.cv_config.scan_rate_vps).toFixed(3); $('cvCycles').value=m.cv_config.cycles; $('cvQuiet').value=m.cv_config.quiet_ms;
     }
+    if(m.swv_config && !$('swvForm').dataset.dirty){
+      $('swvExperiment').value=m.swv_config.experiment_name||''; $('swvStart').value=Number(m.swv_config.start_v).toFixed(3); $('swvEnd').value=Number(m.swv_config.end_v).toFixed(3); $('swvStep').value=Number(m.swv_config.step_v).toFixed(3); $('swvAmplitude').value=Number(m.swv_config.amplitude_v).toFixed(3); $('swvFrequency').value=Number(m.swv_config.frequency_hz).toFixed(1); $('swvQuiet').value=m.swv_config.quiet_ms;
+    }
     if(measurementStateKnown && measurementWasActive && !measurementActive){
       loadCvFiles();
     }
@@ -143,7 +160,7 @@ async function loadCvFiles(){
   const box=$('cvFiles');
   try{
     const data=await getJson('/api/cv/files');
-    if(!data.files.length){ box.innerHTML='<p class="small">No CV files on SD card.</p>'; return; }
+    if(!data.files.length){ box.innerHTML='<p class="small">No measurement files on SD card.</p>'; return; }
     box.innerHTML=data.files.map(f=>`<div class="item"><div><div class="ssid">${escapeHtml(f.name)}</div><div class="meta">${Number(f.size||0)} bytes</div></div><div class="actions" style="margin-top:0"><button class="danger" type="button" onclick="deleteCvFile('${jsString(f.name)}')">Del</button><a href="/api/cv/download-bin?file=${encodeURIComponent(f.name)}"><button type="button">BIN</button></a><button type="button" onclick="downloadCsvFromBin('${jsString(f.name)}')">CSV</button></div></div>`).join('');
   }catch(e){
     box.innerHTML=`<p class="small">File list error: ${escapeHtml(e.message)}</p>`;
@@ -182,8 +199,16 @@ function cvBinToCsv(buffer){
   const headerSize=view.getUint16(10,true);
   const recordSize=view.getUint32(12,true);
   const magic=readCString(view,0,8);
-  if(magic!=='POTCVB1' || headerSize!==104 || recordSize!==56) throw new Error('Invalid CV binary format');
-  const header=[
+  if((magic!=='POTCVB1' && magic!=='POTSWV1') || headerSize!==104 || recordSize!==56) throw new Error('Invalid measurement binary format');
+  const header=magic==='POTSWV1' ? [
+    ['experiment_name',readCString(view,68,32)],
+    ['start_v',view.getFloat32(36,true)],
+    ['end_v',view.getFloat32(40,true)],
+    ['step_v',view.getFloat32(52,true)],
+    ['amplitude_v',view.getFloat32(44,true)],
+    ['frequency_hz',view.getFloat32(56,true)],
+    ['quiet_ms',view.getUint32(64,true)]
+  ] : [
     ['experiment_name',readCString(view,68,32)],
     ['start_v',view.getFloat32(36,true)],
     ['vertex1_v',view.getFloat32(40,true)],
@@ -226,9 +251,13 @@ async function downloadCsvFromBin(file){
   }
 }
 function cvParams(){ const fd=new FormData($('cvForm')); fd.set('mode','CV'); return new URLSearchParams(fd); }
+function swvParams(){ const fd=new FormData($('swvForm')); fd.set('mode','SWV'); return new URLSearchParams(fd); }
 async function saveCvConfig(){ await getJson('/api/measurement/cv',{method:'POST',body:cvParams()}); $('cvForm').dataset.dirty=''; toast('CV parameters saved'); loadMeasurement(); }
+async function saveSwvConfig(){ await getJson('/api/measurement/swv',{method:'POST',body:swvParams()}); $('swvForm').dataset.dirty=''; toast('SWV parameters saved'); loadMeasurement(); }
 $('cvForm').addEventListener('input',()=>{$('cvForm').dataset.dirty='1';});
 $('cvForm').addEventListener('submit',async(ev)=>{ ev.preventDefault(); await getJson('/api/measurement/start',{method:'POST',body:cvParams()}); $('cvForm').dataset.dirty=''; toast('CV started'); loadMeasurement(); });
+$('swvForm').addEventListener('input',()=>{$('swvForm').dataset.dirty='1';});
+$('swvForm').addEventListener('submit',async(ev)=>{ ev.preventDefault(); await getJson('/api/measurement/start',{method:'POST',body:swvParams()}); $('swvForm').dataset.dirty=''; toast('SWV started'); loadMeasurement(); });
 function selectSsid(ssid){ $('ssid').value=ssid; $('pass').focus(); toast('SSID selected'); }
 $('wifiForm').addEventListener('submit', async (ev)=>{ ev.preventDefault(); const fd=new FormData(ev.target); if(!$('enterprise').checked) fd.delete('enterprise'); try{ const r=await fetch('/api/save',{method:'POST',body:new URLSearchParams(fd)}); const j=await r.json(); toast(j.message||'Saved'); setTimeout(refreshAll,1400); }catch(e){toast('Save error: '+e.message);} });
 function refreshAll(){ loadStatus(); loadNetworks(); loadMeasurement(); loadCvFiles(); }
