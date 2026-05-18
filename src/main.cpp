@@ -347,6 +347,8 @@ static QueueHandle_t loggerQueue = nullptr;
 static QueueHandle_t sdRecordQueue = nullptr;
 
 static bool initSdCard();
+void vibrationOn(uint8_t duty);
+void vibrationOff();
 
 // ======================================================
 // Runtime state
@@ -491,6 +493,19 @@ struct SwvConfig {
   float stepV;
   float amplitudeV;
   float frequencyHz;
+  float periodMs;
+  float dutyMs;
+  float dutyPercent;
+  bool useFrequency;
+  bool useDutyPercent;
+  bool conditioningEnabled;
+  float conditioningV;
+  uint32_t conditioningMs;
+  bool agitationEnabled;
+  uint32_t agitationOnMs;
+  uint32_t agitationOffMs;
+  uint8_t motorPowerPercent;
+  uint32_t settleAfterMs;
   uint32_t quietMs;
 };
 
@@ -501,6 +516,19 @@ static SwvConfig swvConfig = {
   0.005f,   // stepV
   0.025f,   // amplitudeV
   25.0f,    // frequencyHz
+  40.0f,    // periodMs
+  20.0f,    // dutyMs
+  50.0f,    // dutyPercent
+  false,    // useFrequency; default is period time input
+  false,    // useDutyPercent; default is duty time input
+  false,    // conditioningEnabled
+  0.0f,     // conditioningV
+  60000,    // conditioningMs
+  false,    // agitationEnabled
+  2000,     // agitationOnMs
+  3000,     // agitationOffMs
+  60,       // motorPowerPercent
+  2000,     // settleAfterMs
   0         // quietMs
 };
 
@@ -1180,6 +1208,12 @@ static void makeCvHeader(CvBinHeader &header, const CvConfig &cfg, uint64_t star
 }
 
 static void makeSwvHeader(CvBinHeader &header, const SwvConfig &cfg, uint64_t startedUs) {
+  float frequencyHz = cfg.useFrequency ? cfg.frequencyHz : (1000.0f / cfg.periodMs);
+  float periodMs = 1000.0f / frequencyHz;
+  float dutyMs = cfg.useDutyPercent ? (periodMs * cfg.dutyPercent * 0.01f) : cfg.dutyMs;
+  dutyMs = clampFloat(dutyMs, 0.1f, periodMs - 0.1f);
+  float dutyPercent = (periodMs > 0.0f) ? ((dutyMs / periodMs) * 100.0f) : 50.0f;
+
   memset(&header, 0, sizeof(header));
   memcpy(header.magic, "POTSWV1", 7);
   header.version = 1;
@@ -1192,9 +1226,9 @@ static void makeSwvHeader(CvBinHeader &header, const SwvConfig &cfg, uint64_t st
   header.startV = cfg.startV;
   header.vertex1V = cfg.endV;
   header.vertex2V = cfg.amplitudeV;
-  header.finalV = 0.0f;
+  header.finalV = dutyPercent;
   header.stepV = cfg.stepV;
-  header.scanRateVps = cfg.frequencyHz;
+  header.scanRateVps = frequencyHz;
   header.cycles = 1;
   header.quietMs = cfg.quietMs;
   strncpy(header.experimentName, cfg.experimentName, sizeof(header.experimentName) - 1);
@@ -1609,6 +1643,62 @@ static char readCurrentAtPotential(float potentialV, uint32_t holdUs, uint16_t &
   return action;
 }
 
+static uint8_t motorPercentToDuty(uint8_t percent) {
+  if (percent > 100) percent = 100;
+  return (uint8_t)((uint16_t)percent * 255U / 100U);
+}
+
+static bool runSwvConditioning() {
+  if (!swvConfig.conditioningEnabled || swvConfig.conditioningMs == 0) return true;
+
+  float conditioningDacV = potentialToDacVoltage(swvConfig.conditioningV);
+  writeAD5680_safe(voltageToDACCode(conditioningDacV));
+  vibrationOff();
+
+  Serial.print("SWV conditioning ");
+  Serial.print(swvConfig.conditioningV, 3);
+  Serial.print(" V for ");
+  Serial.print(swvConfig.conditioningMs);
+  Serial.println(" ms");
+
+  uint64_t endUs = esp_timer_get_time() + ((uint64_t)swvConfig.conditioningMs * 1000ULL);
+  bool motorOn = false;
+  uint64_t nextToggleUs = esp_timer_get_time();
+  uint8_t motorDuty = motorPercentToDuty(swvConfig.motorPowerPercent);
+
+  while (measurementEnabled && !measurementStopRequested && esp_timer_get_time() < endUs) {
+    uint64_t nowUs = esp_timer_get_time();
+
+    if (swvConfig.agitationEnabled) {
+      if (nowUs >= nextToggleUs) {
+        motorOn = !motorOn;
+        if (motorOn) {
+          vibrationOn(motorDuty);
+          nextToggleUs = nowUs + ((uint64_t)swvConfig.agitationOnMs * 1000ULL);
+        } else {
+          vibrationOff();
+          nextToggleUs = nowUs + ((uint64_t)swvConfig.agitationOffMs * 1000ULL);
+        }
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+
+  vibrationOff();
+  if (!measurementEnabled || measurementStopRequested) return false;
+
+  if (swvConfig.settleAfterMs > 0) {
+    uint32_t waitedMs = 0;
+    while (measurementEnabled && !measurementStopRequested && waitedMs < swvConfig.settleAfterMs) {
+      vTaskDelay(pdMS_TO_TICKS(20));
+      waitedMs += 20;
+    }
+  }
+
+  return measurementEnabled && !measurementStopRequested;
+}
+
 static void runSwvMode(uint32_t &sampleIndex) {
   SwvConfig cfg = swvConfig;
   swvConfig.startV = clampFloat(cfg.startV, CV_MIN_POTENTIAL_V, CV_MAX_POTENTIAL_V);
@@ -1616,6 +1706,33 @@ static void runSwvMode(uint32_t &sampleIndex) {
   swvConfig.stepV = clampFloat(fabsf(cfg.stepV), 0.0005f, 0.25f);
   swvConfig.amplitudeV = clampFloat(fabsf(cfg.amplitudeV), 0.0005f, 1.0f);
   swvConfig.frequencyHz = clampFloat(fabsf(cfg.frequencyHz), 0.1f, 500.0f);
+  swvConfig.periodMs = clampFloat(fabsf(cfg.periodMs), 2.0f, 10000.0f);
+  swvConfig.useFrequency = cfg.useFrequency;
+  swvConfig.useDutyPercent = cfg.useDutyPercent;
+  swvConfig.frequencyHz = swvConfig.useFrequency ? swvConfig.frequencyHz : (1000.0f / swvConfig.periodMs);
+  swvConfig.periodMs = 1000.0f / swvConfig.frequencyHz;
+  swvConfig.dutyPercent = clampFloat(fabsf(cfg.dutyPercent), 1.0f, 99.0f);
+  swvConfig.dutyMs = fabsf(cfg.dutyMs);
+  if (swvConfig.useDutyPercent) {
+    swvConfig.dutyMs = swvConfig.periodMs * swvConfig.dutyPercent * 0.01f;
+  } else {
+    swvConfig.dutyMs = clampFloat(swvConfig.dutyMs, 0.1f, swvConfig.periodMs - 0.1f);
+    swvConfig.dutyPercent = (swvConfig.dutyMs / swvConfig.periodMs) * 100.0f;
+  }
+  swvConfig.conditioningEnabled = cfg.conditioningEnabled;
+  swvConfig.conditioningV = cfg.conditioningV;
+  swvConfig.conditioningMs = cfg.conditioningMs;
+  swvConfig.agitationEnabled = cfg.agitationEnabled;
+  swvConfig.agitationOnMs = cfg.agitationOnMs;
+  swvConfig.agitationOffMs = cfg.agitationOffMs;
+  swvConfig.motorPowerPercent = cfg.motorPowerPercent;
+  swvConfig.settleAfterMs = cfg.settleAfterMs;
+  swvConfig.conditioningV = clampFloat(cfg.conditioningV, CV_MIN_POTENTIAL_V, CV_MAX_POTENTIAL_V);
+  if (swvConfig.conditioningMs > 600000UL) swvConfig.conditioningMs = 600000UL;
+  if (swvConfig.agitationOnMs < 100UL) swvConfig.agitationOnMs = 100UL;
+  if (swvConfig.agitationOffMs < 100UL) swvConfig.agitationOffMs = 100UL;
+  if (swvConfig.motorPowerPercent > 100) swvConfig.motorPowerPercent = 100;
+  if (swvConfig.settleAfterMs > 60000UL) swvConfig.settleAfterMs = 60000UL;
   if (swvConfig.quietMs > 600000UL) swvConfig.quietMs = 600000UL;
 
 #if ENABLE_SD_LOGGING
@@ -1632,10 +1749,20 @@ static void runSwvMode(uint32_t &sampleIndex) {
   sdRecordWriteCount = 0;
   sdRecordDropCount = 0;
   sdWriteErrorCount = 0;
-  cvLogActive = true;
 
   Serial.print("SWV started file=");
   Serial.println(activeCvFilePath);
+
+  if (!runSwvConditioning()) {
+    vibrationOff();
+    measurementStopRequested = true;
+    measurementEnabled = false;
+    setMeasurementPriority(false);
+    Serial.println("SWV stopped during conditioning");
+    return;
+  }
+
+  cvLogActive = true;
 
   writeAD5680_safe(voltageToDACCode(potentialToDacVoltage(swvConfig.startV)));
   if (swvConfig.quietMs > 0) {
@@ -1649,8 +1776,10 @@ static void runSwvMode(uint32_t &sampleIndex) {
   int sign = (swvConfig.endV >= swvConfig.startV) ? 1 : -1;
   SweepDirection direction = (sign > 0) ? DIR_UP : DIR_DOWN;
   uint32_t totalSteps = (uint32_t)floorf(fabsf(swvConfig.endV - swvConfig.startV) / swvConfig.stepV) + 1;
-  uint32_t halfPeriodUs = (uint32_t)(500000.0f / swvConfig.frequencyHz);
-  if (halfPeriodUs < 1000) halfPeriodUs = 1000;
+  uint32_t forwardHoldUs = (uint32_t)(swvConfig.dutyMs * 1000.0f);
+  uint32_t reverseHoldUs = (uint32_t)((swvConfig.periodMs - swvConfig.dutyMs) * 1000.0f);
+  if (forwardHoldUs < 100) forwardHoldUs = 100;
+  if (reverseHoldUs < 100) reverseHoldUs = 100;
 
   bool swvCompleted = true;
   for (uint32_t stepIndex = 0; stepIndex < totalSteps && measurementEnabled && !measurementStopRequested; stepIndex++) {
@@ -1674,8 +1803,8 @@ static void runSwvMode(uint32_t &sampleIndex) {
     uint8_t tiaCN = getCurrentTIACN();
     char action = '-';
 
-    action = readCurrentAtPotential(forwardPotential, halfPeriodUs, forwardRaw, forwardAdcV, forwardCurrentA, rtiaOhm, tiaCN);
-    char reverseAction = readCurrentAtPotential(reversePotential, halfPeriodUs, reverseRaw, reverseAdcV, reverseCurrentA, rtiaOhm, tiaCN);
+    action = readCurrentAtPotential(forwardPotential, forwardHoldUs, forwardRaw, forwardAdcV, forwardCurrentA, rtiaOhm, tiaCN);
+    char reverseAction = readCurrentAtPotential(reversePotential, reverseHoldUs, reverseRaw, reverseAdcV, reverseCurrentA, rtiaOhm, tiaCN);
     if (action == '-') action = reverseAction;
 
     MeasurementData data;
@@ -3139,6 +3268,33 @@ static String swvConfigJson() {
   json += String(cfg.amplitudeV, 4);
   json += F(",\"frequency_hz\":");
   json += String(cfg.frequencyHz, 4);
+  json += F(",\"period_ms\":");
+  json += String(cfg.periodMs, 4);
+  json += F(",\"duty_ms\":");
+  json += String(cfg.dutyMs, 4);
+  json += F(",\"duty_percent\":");
+  json += String(cfg.dutyPercent, 4);
+  json += F(",\"timing_mode\":\"");
+  json += cfg.useFrequency ? F("frequency") : F("period");
+  json += F("\",\"duty_mode\":\"");
+  json += cfg.useDutyPercent ? F("percent") : F("time");
+  json += F("\"");
+  json += F(",\"conditioning_enabled\":");
+  json += cfg.conditioningEnabled ? F("true") : F("false");
+  json += F(",\"conditioning_v\":");
+  json += String(cfg.conditioningV, 4);
+  json += F(",\"conditioning_ms\":");
+  json += String(cfg.conditioningMs);
+  json += F(",\"agitation_enabled\":");
+  json += cfg.agitationEnabled ? F("true") : F("false");
+  json += F(",\"agitation_on_ms\":");
+  json += String(cfg.agitationOnMs);
+  json += F(",\"agitation_off_ms\":");
+  json += String(cfg.agitationOffMs);
+  json += F(",\"motor_power_percent\":");
+  json += String(cfg.motorPowerPercent);
+  json += F(",\"settle_after_ms\":");
+  json += String(cfg.settleAfterMs);
   json += F(",\"quiet_ms\":");
   json += String(cfg.quietMs);
   json += F(",\"min_v\":");
@@ -3214,6 +3370,14 @@ static uint32_t webArgUInt(const char *name, uint32_t fallback) {
   return (uint32_t)value.toInt();
 }
 
+static bool webArgBool(const char *name, bool fallback) {
+  if (!wifiServer.hasArg(name)) return fallback;
+  String value = wifiServer.arg(name);
+  value.trim();
+  value.toLowerCase();
+  return value == "1" || value == "true" || value == "on" || value == "yes";
+}
+
 static bool applyCvConfigFromRequest() {
   if (measurementEnabled || measurementBusy) {
     return false;
@@ -3260,6 +3424,29 @@ static bool applySwvConfigFromRequest() {
   next.stepV = webArgFloat("step_v", next.stepV);
   next.amplitudeV = webArgFloat("amplitude_v", next.amplitudeV);
   next.frequencyHz = webArgFloat("frequency_hz", next.frequencyHz);
+  next.periodMs = webArgFloat("period_ms", next.periodMs);
+  next.dutyMs = webArgFloat("duty_ms", next.dutyMs);
+  next.dutyPercent = webArgFloat("duty_percent", next.dutyPercent);
+  if (wifiServer.hasArg("timing_mode")) {
+    String mode = wifiServer.arg("timing_mode");
+    mode.trim();
+    mode.toLowerCase();
+    next.useFrequency = (mode == "frequency" || mode == "freq");
+  }
+  if (wifiServer.hasArg("duty_mode")) {
+    String mode = wifiServer.arg("duty_mode");
+    mode.trim();
+    mode.toLowerCase();
+    next.useDutyPercent = (mode == "percent" || mode == "percentage");
+  }
+  next.conditioningEnabled = webArgBool("conditioning_enabled", false);
+  next.conditioningV = webArgFloat("conditioning_v", next.conditioningV);
+  next.conditioningMs = webArgUInt("conditioning_ms", next.conditioningMs);
+  next.agitationEnabled = webArgBool("agitation_enabled", false);
+  next.agitationOnMs = webArgUInt("agitation_on_ms", next.agitationOnMs);
+  next.agitationOffMs = webArgUInt("agitation_off_ms", next.agitationOffMs);
+  next.motorPowerPercent = (uint8_t)webArgUInt("motor_power_percent", next.motorPowerPercent);
+  next.settleAfterMs = webArgUInt("settle_after_ms", next.settleAfterMs);
   next.quietMs = webArgUInt("quiet_ms", next.quietMs);
 
   next.startV = clampFloat(next.startV, CV_MIN_POTENTIAL_V, CV_MAX_POTENTIAL_V);
@@ -3267,6 +3454,23 @@ static bool applySwvConfigFromRequest() {
   next.stepV = clampFloat(fabsf(next.stepV), 0.0005f, 0.25f);
   next.amplitudeV = clampFloat(fabsf(next.amplitudeV), 0.0005f, 1.0f);
   next.frequencyHz = clampFloat(fabsf(next.frequencyHz), 0.1f, 500.0f);
+  next.periodMs = clampFloat(fabsf(next.periodMs), 2.0f, 10000.0f);
+  next.frequencyHz = next.useFrequency ? next.frequencyHz : (1000.0f / next.periodMs);
+  next.periodMs = 1000.0f / next.frequencyHz;
+  next.dutyPercent = clampFloat(fabsf(next.dutyPercent), 1.0f, 99.0f);
+  next.dutyMs = fabsf(next.dutyMs);
+  if (next.useDutyPercent) {
+    next.dutyMs = next.periodMs * next.dutyPercent * 0.01f;
+  } else {
+    next.dutyMs = clampFloat(next.dutyMs, 0.1f, next.periodMs - 0.1f);
+    next.dutyPercent = (next.dutyMs / next.periodMs) * 100.0f;
+  }
+  next.conditioningV = clampFloat(next.conditioningV, CV_MIN_POTENTIAL_V, CV_MAX_POTENTIAL_V);
+  if (next.conditioningMs > 600000UL) next.conditioningMs = 600000UL;
+  if (next.agitationOnMs < 100UL) next.agitationOnMs = 100UL;
+  if (next.agitationOffMs < 100UL) next.agitationOffMs = 100UL;
+  if (next.motorPowerPercent > 100) next.motorPowerPercent = 100;
+  if (next.settleAfterMs > 60000UL) next.settleAfterMs = 60000UL;
   if (next.quietMs > 600000UL) next.quietMs = 600000UL;
 
   swvConfig = next;
@@ -3294,7 +3498,11 @@ static void handleSwvConfigApi() {
 }
 
 static void handleMeasurementStartApi() {
-  bool hasSwvArgs = wifiServer.hasArg("end_v") || wifiServer.hasArg("amplitude_v") || wifiServer.hasArg("frequency_hz");
+  bool hasSwvArgs = wifiServer.hasArg("end_v") || wifiServer.hasArg("amplitude_v") ||
+      wifiServer.hasArg("frequency_hz") || wifiServer.hasArg("period_ms") ||
+      wifiServer.hasArg("duty_ms") || wifiServer.hasArg("duty_percent") ||
+      wifiServer.hasArg("conditioning_enabled") || wifiServer.hasArg("conditioning_v") ||
+      wifiServer.hasArg("conditioning_ms") || wifiServer.hasArg("agitation_enabled");
   bool hasCvArgs = wifiServer.hasArg("start_v") || wifiServer.hasArg("vertex1_v") ||
       wifiServer.hasArg("vertex2_v") || wifiServer.hasArg("final_v") ||
       wifiServer.hasArg("step_v") || wifiServer.hasArg("scan_rate_vps") ||
@@ -3430,13 +3638,18 @@ static void handleCvDownloadCsvApi() {
   wifiServer.send(200, "text/csv", "");
 
   if (memcmp(header.magic, "POTSWV1", 7) == 0) {
-    wifiServer.sendContent(F("experiment_name,start_v,end_v,step_v,amplitude_v,frequency_hz,quiet_ms\n"));
+    float periodMs = 1000.0f / header.scanRateVps;
+    float dutyMs = periodMs * header.finalV * 0.01f;
+    wifiServer.sendContent(F("experiment_name,start_v,end_v,step_v,amplitude_v,frequency_hz,period_ms,duty_ms,duty_percent,quiet_ms\n"));
     wifiServer.sendContent(String(header.experimentName) + "," +
                            String(header.startV, 6) + "," +
                            String(header.vertex1V, 6) + "," +
                            String(header.stepV, 6) + "," +
                            String(header.vertex2V, 6) + "," +
                            String(header.scanRateVps, 6) + "," +
+                           String(periodMs, 6) + "," +
+                           String(dutyMs, 6) + "," +
+                           String(header.finalV, 6) + "," +
                            String(header.quietMs) + "\n\n");
   } else {
     wifiServer.sendContent(F("experiment_name,start_v,vertex1_v,vertex2_v,final_v,step_v,scan_rate_vps,cycles,quiet_ms\n"));
@@ -3908,7 +4121,7 @@ void setup() {
   digitalWrite(LED_BUILTIN_PIN, LOW);
 
   vibrationBegin();
-  vibrationPulse(120, 300); 
+  vibrationPulse(50, 300); 
   
   // ------------------------------
   // FreeRTOS objects first
