@@ -439,7 +439,8 @@ enum MeasurementMode : uint8_t {
   MEAS_MODE_SWEEP = 0,
   MEAS_MODE_HOLD_CENTER = 1,
   MEAS_MODE_CV = 2,
-  MEAS_MODE_SWV = 3
+  MEAS_MODE_SWV = 3,
+  MEAS_MODE_DPV = 4
 };
 
 volatile MeasurementMode currentMeasurementMode = MEAS_MODE_SWEEP;
@@ -521,6 +522,44 @@ static SwvConfig swvConfig = {
   50.0f,    // dutyPercent
   false,    // useFrequency; default is period time input
   false,    // useDutyPercent; default is duty time input
+  false,    // conditioningEnabled
+  0.0f,     // conditioningV
+  60000,    // conditioningMs
+  false,    // agitationEnabled
+  2000,     // agitationOnMs
+  3000,     // agitationOffMs
+  60,       // motorPowerPercent
+  2000,     // settleAfterMs
+  0         // quietMs
+};
+
+struct DpvConfig {
+  char experimentName[32];
+  float startV;
+  float endV;
+  float stepV;
+  float amplitudeV;
+  float periodMs;
+  float pulseMs;
+  bool conditioningEnabled;
+  float conditioningV;
+  uint32_t conditioningMs;
+  bool agitationEnabled;
+  uint32_t agitationOnMs;
+  uint32_t agitationOffMs;
+  uint8_t motorPowerPercent;
+  uint32_t settleAfterMs;
+  uint32_t quietMs;
+};
+
+static DpvConfig dpvConfig = {
+  "",       // experimentName
+  -0.5f,    // startV, relative to POTENTIAL_ZERO_V
+  0.5f,     // endV
+  0.005f,   // stepV
+  0.050f,   // amplitudeV
+  500.0f,   // periodMs
+  50.0f,    // pulseMs
   false,    // conditioningEnabled
   0.0f,     // conditioningV
   60000,    // conditioningMs
@@ -646,6 +685,7 @@ static const char *directionToText(SweepDirection d) {
 }
 
 static const char *measurementModeToText(MeasurementMode mode) {
+  if (mode == MEAS_MODE_DPV) return "DPV";
   if (mode == MEAS_MODE_SWV) return "SWV";
   if (mode == MEAS_MODE_CV) return "CV";
   if (mode == MEAS_MODE_HOLD_CENTER) return "HOLD_CENTER";
@@ -660,6 +700,7 @@ static MeasurementMode parseMeasurementMode(const String &value, MeasurementMode
   if (mode == "sweep" || mode == "0") return MEAS_MODE_SWEEP;
   if (mode == "potentiostat_cv" || mode == "cv_mode" || mode == "cv" || mode == "3") return MEAS_MODE_CV;
   if (mode == "swv" || mode == "square_wave" || mode == "square_wave_voltammetry" || mode == "4") return MEAS_MODE_SWV;
+  if (mode == "dpv" || mode == "differential_pulse" || mode == "differential_pulse_voltammetry" || mode == "5") return MEAS_MODE_DPV;
   if (mode == "hold" || mode == "hold_center" || mode == "center" || mode == "1") return MEAS_MODE_HOLD_CENTER;
   return fallback;
 }
@@ -1234,6 +1275,27 @@ static void makeSwvHeader(CvBinHeader &header, const SwvConfig &cfg, uint64_t st
   strncpy(header.experimentName, cfg.experimentName, sizeof(header.experimentName) - 1);
 }
 
+static void makeDpvHeader(CvBinHeader &header, const DpvConfig &cfg, uint64_t startedUs) {
+  memset(&header, 0, sizeof(header));
+  memcpy(header.magic, "POTDPV1", 7);
+  header.version = 1;
+  header.headerSize = sizeof(CvBinHeader);
+  header.recordSize = sizeof(CvBinRecord);
+  header.startedUs = startedUs;
+  header.zeroDacV = POTENTIAL_ZERO_V;
+  header.dacVref = DAC_VREF;
+  header.adcVref = ADC_VREF;
+  header.startV = cfg.startV;
+  header.vertex1V = cfg.endV;
+  header.vertex2V = cfg.amplitudeV;
+  header.finalV = cfg.pulseMs;
+  header.stepV = cfg.stepV;
+  header.scanRateVps = cfg.periodMs;
+  header.cycles = 1;
+  header.quietMs = cfg.quietMs;
+  strncpy(header.experimentName, cfg.experimentName, sizeof(header.experimentName) - 1);
+}
+
 static void sanitizeExperimentName(const String &input, char *output, size_t outputSize) {
   if (outputSize == 0) return;
   size_t pos = 0;
@@ -1303,7 +1365,7 @@ static void makeCvFilePath(char *path, size_t pathSize, uint64_t startedUs, cons
 static void queueCvRecord(const MeasurementData &data) {
 #if ENABLE_SD_LOGGING
   if (!cvLogActive || !sdRecordQueue) return;
-  if (data.mode != MEAS_MODE_CV && data.mode != MEAS_MODE_SWV) return;
+  if (data.mode != MEAS_MODE_CV && data.mode != MEAS_MODE_SWV && data.mode != MEAS_MODE_DPV) return;
 
   CvBinRecord record;
   memset(&record, 0, sizeof(record));
@@ -1699,6 +1761,57 @@ static bool runSwvConditioning() {
   return measurementEnabled && !measurementStopRequested;
 }
 
+static bool runDpvConditioning() {
+  if (!dpvConfig.conditioningEnabled || dpvConfig.conditioningMs == 0) return true;
+
+  float conditioningDacV = potentialToDacVoltage(dpvConfig.conditioningV);
+  writeAD5680_safe(voltageToDACCode(conditioningDacV));
+  vibrationOff();
+
+  Serial.print("DPV conditioning ");
+  Serial.print(dpvConfig.conditioningV, 3);
+  Serial.print(" V for ");
+  Serial.print(dpvConfig.conditioningMs);
+  Serial.println(" ms");
+
+  uint64_t endUs = esp_timer_get_time() + ((uint64_t)dpvConfig.conditioningMs * 1000ULL);
+  bool motorOn = false;
+  uint64_t nextToggleUs = esp_timer_get_time();
+  uint8_t motorDuty = motorPercentToDuty(dpvConfig.motorPowerPercent);
+
+  while (measurementEnabled && !measurementStopRequested && esp_timer_get_time() < endUs) {
+    uint64_t nowUs = esp_timer_get_time();
+
+    if (dpvConfig.agitationEnabled) {
+      if (nowUs >= nextToggleUs) {
+        motorOn = !motorOn;
+        if (motorOn) {
+          vibrationOn(motorDuty);
+          nextToggleUs = nowUs + ((uint64_t)dpvConfig.agitationOnMs * 1000ULL);
+        } else {
+          vibrationOff();
+          nextToggleUs = nowUs + ((uint64_t)dpvConfig.agitationOffMs * 1000ULL);
+        }
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+
+  vibrationOff();
+  if (!measurementEnabled || measurementStopRequested) return false;
+
+  if (dpvConfig.settleAfterMs > 0) {
+    uint32_t waitedMs = 0;
+    while (measurementEnabled && !measurementStopRequested && waitedMs < dpvConfig.settleAfterMs) {
+      vTaskDelay(pdMS_TO_TICKS(20));
+      waitedMs += 20;
+    }
+  }
+
+  return measurementEnabled && !measurementStopRequested;
+}
+
 static void runSwvMode(uint32_t &sampleIndex) {
   SwvConfig cfg = swvConfig;
   swvConfig.startV = clampFloat(cfg.startV, CV_MIN_POTENTIAL_V, CV_MAX_POTENTIAL_V);
@@ -1839,6 +1952,131 @@ static void runSwvMode(uint32_t &sampleIndex) {
   Serial.println(swvCompleted ? "SWV completed" : "SWV stopped before completion");
 }
 
+static void runDpvMode(uint32_t &sampleIndex) {
+  DpvConfig cfg = dpvConfig;
+  dpvConfig.startV = clampFloat(cfg.startV, CV_MIN_POTENTIAL_V, CV_MAX_POTENTIAL_V);
+  dpvConfig.endV = clampFloat(cfg.endV, CV_MIN_POTENTIAL_V, CV_MAX_POTENTIAL_V);
+  dpvConfig.stepV = clampFloat(fabsf(cfg.stepV), 0.0005f, 0.25f);
+  dpvConfig.amplitudeV = clampFloat(fabsf(cfg.amplitudeV), 0.0005f, 1.0f);
+  dpvConfig.periodMs = clampFloat(fabsf(cfg.periodMs), 2.0f, 10000.0f);
+  dpvConfig.pulseMs = clampFloat(fabsf(cfg.pulseMs), 0.1f, dpvConfig.periodMs - 0.1f);
+  dpvConfig.conditioningEnabled = cfg.conditioningEnabled;
+  dpvConfig.conditioningV = clampFloat(cfg.conditioningV, CV_MIN_POTENTIAL_V, CV_MAX_POTENTIAL_V);
+  dpvConfig.conditioningMs = cfg.conditioningMs;
+  dpvConfig.agitationEnabled = cfg.agitationEnabled;
+  dpvConfig.agitationOnMs = cfg.agitationOnMs;
+  dpvConfig.agitationOffMs = cfg.agitationOffMs;
+  dpvConfig.motorPowerPercent = cfg.motorPowerPercent;
+  dpvConfig.settleAfterMs = cfg.settleAfterMs;
+  if (dpvConfig.conditioningMs > 600000UL) dpvConfig.conditioningMs = 600000UL;
+  if (dpvConfig.agitationOnMs < 100UL) dpvConfig.agitationOnMs = 100UL;
+  if (dpvConfig.agitationOffMs < 100UL) dpvConfig.agitationOffMs = 100UL;
+  if (dpvConfig.motorPowerPercent > 100) dpvConfig.motorPowerPercent = 100;
+  if (dpvConfig.settleAfterMs > 60000UL) dpvConfig.settleAfterMs = 60000UL;
+  if (dpvConfig.quietMs > 600000UL) dpvConfig.quietMs = 600000UL;
+
+#if ENABLE_SD_LOGGING
+  if (!initSdCard()) {
+    Serial.println("DPV aborted: SD_MMC is not available for .bin logging");
+    requestMeasurementStop();
+    return;
+  }
+#endif
+
+  uint64_t startedUs = esp_timer_get_time();
+  makeDpvHeader(activeCvHeader, dpvConfig, startedUs);
+  makeMeasurementFilePath("dpv", activeCvFilePath, sizeof(activeCvFilePath), startedUs, dpvConfig.experimentName);
+  sdRecordWriteCount = 0;
+  sdRecordDropCount = 0;
+  sdWriteErrorCount = 0;
+
+  Serial.print("DPV started file=");
+  Serial.println(activeCvFilePath);
+
+  if (!runDpvConditioning()) {
+    vibrationOff();
+    measurementStopRequested = true;
+    measurementEnabled = false;
+    setMeasurementPriority(false);
+    Serial.println("DPV stopped during conditioning");
+    return;
+  }
+
+  cvLogActive = true;
+
+  writeAD5680_safe(voltageToDACCode(potentialToDacVoltage(dpvConfig.startV)));
+  if (dpvConfig.quietMs > 0) {
+    uint32_t waitedMs = 0;
+    while (measurementEnabled && !measurementStopRequested && waitedMs < dpvConfig.quietMs) {
+      vTaskDelay(pdMS_TO_TICKS(20));
+      waitedMs += 20;
+    }
+  }
+
+  int sign = (dpvConfig.endV >= dpvConfig.startV) ? 1 : -1;
+  SweepDirection direction = (sign > 0) ? DIR_UP : DIR_DOWN;
+  uint32_t totalSteps = (uint32_t)floorf(fabsf(dpvConfig.endV - dpvConfig.startV) / dpvConfig.stepV) + 1;
+  uint32_t pulseUs = (uint32_t)(dpvConfig.pulseMs * 1000.0f);
+  uint32_t baseHoldUs = (uint32_t)((dpvConfig.periodMs - dpvConfig.pulseMs) * 1000.0f);
+  if (pulseUs < 100) pulseUs = 100;
+  if (baseHoldUs < 100) baseHoldUs = 100;
+
+  bool dpvCompleted = true;
+  for (uint32_t stepIndex = 0; stepIndex < totalSteps && measurementEnabled && !measurementStopRequested; stepIndex++) {
+    uint64_t t0 = esp_timer_get_time();
+    float basePotential = dpvConfig.startV + (sign * dpvConfig.stepV * stepIndex);
+    if ((sign > 0 && basePotential > dpvConfig.endV) || (sign < 0 && basePotential < dpvConfig.endV)) {
+      basePotential = dpvConfig.endV;
+    }
+
+    float pulsePotential = clampFloat(basePotential + (sign * dpvConfig.amplitudeV), CV_MIN_POTENTIAL_V, CV_MAX_POTENTIAL_V);
+
+    uint16_t baseRaw = 0;
+    uint16_t pulseRaw = 0;
+    float baseAdcV = 0.0f;
+    float pulseAdcV = 0.0f;
+    float baseCurrentA = 0.0f;
+    float pulseCurrentA = 0.0f;
+    float rtiaOhm = getCurrentRtiaOhm();
+    uint8_t tiaCN = getCurrentTIACN();
+    char action = '-';
+
+    action = readCurrentAtPotential(basePotential, baseHoldUs, baseRaw, baseAdcV, baseCurrentA, rtiaOhm, tiaCN);
+    char pulseAction = readCurrentAtPotential(pulsePotential, pulseUs, pulseRaw, pulseAdcV, pulseCurrentA, rtiaOhm, tiaCN);
+    if (action == '-') action = pulseAction;
+
+    MeasurementData data;
+    memset(&data, 0, sizeof(data));
+    data.mode = MEAS_MODE_DPV;
+    data.sampleIndex = sampleIndex++;
+    data.direction = direction;
+    data.dacSetVoltage = potentialToDacVoltage(basePotential);
+    data.dacCode = voltageToDACCode(data.dacSetVoltage);
+    data.dacExpectedVoltage = dacCodeToVoltage(data.dacCode);
+    data.adcRaw = pulseRaw;
+    data.adcVoltage = pulseAdcV;
+    data.adcDeltaVoltage = (pulseAdcV - baseAdcV);
+    data.currentAmp = pulseCurrentA - baseCurrentA;
+    data.rtiaOhm = rtiaOhm;
+    data.tiaCN = tiaCN;
+    data.autoRangeAction = action;
+    data.timestamp_us = esp_timer_get_time();
+    data.period_us = (uint32_t)(data.timestamp_us - t0);
+    publishMeasurement(data);
+
+    vTaskDelay(1);
+  }
+
+  if (measurementStopRequested) dpvCompleted = false;
+
+  cvLogActive = false;
+  measurementStopRequested = true;
+  measurementEnabled = false;
+  setMeasurementPriority(false);
+
+  Serial.println(dpvCompleted ? "DPV completed" : "DPV stopped before completion");
+}
+
 // ======================================================
 // Tasks
 // ======================================================
@@ -1882,6 +2120,8 @@ void measurementTask(void *pvParameters) {
         runCvMode(sampleIndex);
       } else if (mode == MEAS_MODE_SWV) {
         runSwvMode(sampleIndex);
+      } else if (mode == MEAS_MODE_DPV) {
+        runDpvMode(sampleIndex);
       } else {
         runSweepMode(sampleIndex);
       }
@@ -2570,9 +2810,12 @@ void handleSerialCommand(char c) {
   else if (c == '4') {
     selectMeasurementModeFromSerial(MEAS_MODE_SWV);
   }
+  else if (c == '5') {
+    selectMeasurementModeFromSerial(MEAS_MODE_DPV);
+  }
   else if (c == 'm' || c == 'M') {
     printMeasurementMode();
-    Serial.println("Modes: 1=SWEEP, 2=HOLD_CENTER, 3=CV, 4=SWV");
+    Serial.println("Modes: 1=SWEEP, 2=HOLD_CENTER, 3=CV, 4=SWV, 5=DPV");
   }
 }
 
@@ -3305,6 +3548,48 @@ static String swvConfigJson() {
   return json;
 }
 
+static String dpvConfigJson() {
+  DpvConfig cfg = dpvConfig;
+  String json = F("{\"experiment_name\":\"");
+  json += jsonEscape(String(cfg.experimentName));
+  json += F("\",\"start_v\":");
+  json += String(cfg.startV, 4);
+  json += F(",\"end_v\":");
+  json += String(cfg.endV, 4);
+  json += F(",\"step_v\":");
+  json += String(cfg.stepV, 4);
+  json += F(",\"amplitude_v\":");
+  json += String(cfg.amplitudeV, 4);
+  json += F(",\"period_ms\":");
+  json += String(cfg.periodMs, 4);
+  json += F(",\"pulse_ms\":");
+  json += String(cfg.pulseMs, 4);
+  json += F(",\"conditioning_enabled\":");
+  json += cfg.conditioningEnabled ? F("true") : F("false");
+  json += F(",\"conditioning_v\":");
+  json += String(cfg.conditioningV, 4);
+  json += F(",\"conditioning_ms\":");
+  json += String(cfg.conditioningMs);
+  json += F(",\"agitation_enabled\":");
+  json += cfg.agitationEnabled ? F("true") : F("false");
+  json += F(",\"agitation_on_ms\":");
+  json += String(cfg.agitationOnMs);
+  json += F(",\"agitation_off_ms\":");
+  json += String(cfg.agitationOffMs);
+  json += F(",\"motor_power_percent\":");
+  json += String(cfg.motorPowerPercent);
+  json += F(",\"settle_after_ms\":");
+  json += String(cfg.settleAfterMs);
+  json += F(",\"quiet_ms\":");
+  json += String(cfg.quietMs);
+  json += F(",\"min_v\":");
+  json += String(CV_MIN_POTENTIAL_V, 3);
+  json += F(",\"max_v\":");
+  json += String(CV_MAX_POTENTIAL_V, 3);
+  json += F("}");
+  return json;
+}
+
 static String measurementStatusJson() {
   String json = F("{\"running\":");
   json += measurementEnabled ? F("true") : F("false");
@@ -3314,11 +3599,13 @@ static String measurementStatusJson() {
   json += measurementStopRequested ? F("true") : F("false");
   json += F(",\"mode\":\"");
   json += measurementModeToText(getMeasurementMode());
-  json += F("\",\"modes\":[\"SWEEP\",\"HOLD_CENTER\",\"CV\",\"SWV\"]");
+  json += F("\",\"modes\":[\"SWEEP\",\"HOLD_CENTER\",\"CV\",\"SWV\",\"DPV\"]");
   json += F(",\"cv_config\":");
   json += cvConfigJson();
   json += F(",\"swv_config\":");
   json += swvConfigJson();
+  json += F(",\"dpv_config\":");
+  json += dpvConfigJson();
   json += F(",\"sd_mounted\":");
   json += sdMounted ? F("true") : F("false");
   json += F(",\"sd_log_file_open\":");
@@ -3477,6 +3764,49 @@ static bool applySwvConfigFromRequest() {
   return true;
 }
 
+static bool applyDpvConfigFromRequest() {
+  if (measurementEnabled || measurementBusy) {
+    return false;
+  }
+
+  DpvConfig next = dpvConfig;
+  if (wifiServer.hasArg("experiment_name")) {
+    sanitizeExperimentName(wifiServer.arg("experiment_name"), next.experimentName, sizeof(next.experimentName));
+  }
+  next.startV = webArgFloat("start_v", next.startV);
+  next.endV = webArgFloat("end_v", next.endV);
+  next.stepV = webArgFloat("step_v", next.stepV);
+  next.amplitudeV = webArgFloat("amplitude_v", next.amplitudeV);
+  next.periodMs = webArgFloat("period_ms", next.periodMs);
+  next.pulseMs = webArgFloat("pulse_ms", next.pulseMs);
+  next.conditioningEnabled = webArgBool("conditioning_enabled", false);
+  next.conditioningV = webArgFloat("conditioning_v", next.conditioningV);
+  next.conditioningMs = webArgUInt("conditioning_ms", next.conditioningMs);
+  next.agitationEnabled = webArgBool("agitation_enabled", false);
+  next.agitationOnMs = webArgUInt("agitation_on_ms", next.agitationOnMs);
+  next.agitationOffMs = webArgUInt("agitation_off_ms", next.agitationOffMs);
+  next.motorPowerPercent = (uint8_t)webArgUInt("motor_power_percent", next.motorPowerPercent);
+  next.settleAfterMs = webArgUInt("settle_after_ms", next.settleAfterMs);
+  next.quietMs = webArgUInt("quiet_ms", next.quietMs);
+
+  next.startV = clampFloat(next.startV, CV_MIN_POTENTIAL_V, CV_MAX_POTENTIAL_V);
+  next.endV = clampFloat(next.endV, CV_MIN_POTENTIAL_V, CV_MAX_POTENTIAL_V);
+  next.stepV = clampFloat(fabsf(next.stepV), 0.0005f, 0.25f);
+  next.amplitudeV = clampFloat(fabsf(next.amplitudeV), 0.0005f, 1.0f);
+  next.periodMs = clampFloat(fabsf(next.periodMs), 2.0f, 10000.0f);
+  next.pulseMs = clampFloat(fabsf(next.pulseMs), 0.1f, next.periodMs - 0.1f);
+  next.conditioningV = clampFloat(next.conditioningV, CV_MIN_POTENTIAL_V, CV_MAX_POTENTIAL_V);
+  if (next.conditioningMs > 600000UL) next.conditioningMs = 600000UL;
+  if (next.agitationOnMs < 100UL) next.agitationOnMs = 100UL;
+  if (next.agitationOffMs < 100UL) next.agitationOffMs = 100UL;
+  if (next.motorPowerPercent > 100) next.motorPowerPercent = 100;
+  if (next.settleAfterMs > 60000UL) next.settleAfterMs = 60000UL;
+  if (next.quietMs > 600000UL) next.quietMs = 600000UL;
+
+  dpvConfig = next;
+  return true;
+}
+
 static void handleCvConfigApi() {
   if (!applyCvConfigFromRequest()) {
     wifiServer.send(409, "application/json", F("{\"ok\":false,\"message\":\"Stop measurement before changing CV parameters\"}"));
@@ -3497,7 +3827,18 @@ static void handleSwvConfigApi() {
   wifiServer.send(200, "application/json", measurementStatusJson());
 }
 
+static void handleDpvConfigApi() {
+  if (!applyDpvConfigFromRequest()) {
+    wifiServer.send(409, "application/json", F("{\"ok\":false,\"message\":\"Stop measurement before changing DPV parameters\"}"));
+    return;
+  }
+
+  currentMeasurementMode = MEAS_MODE_DPV;
+  wifiServer.send(200, "application/json", measurementStatusJson());
+}
+
 static void handleMeasurementStartApi() {
+  bool hasDpvArgs = wifiServer.hasArg("pulse_ms") || wifiServer.arg("mode") == "DPV";
   bool hasSwvArgs = wifiServer.hasArg("end_v") || wifiServer.hasArg("amplitude_v") ||
       wifiServer.hasArg("frequency_hz") || wifiServer.hasArg("period_ms") ||
       wifiServer.hasArg("duty_ms") || wifiServer.hasArg("duty_percent") ||
@@ -3509,7 +3850,12 @@ static void handleMeasurementStartApi() {
       wifiServer.hasArg("cycles") || wifiServer.hasArg("quiet_ms") ||
       wifiServer.hasArg("experiment_name");
 
-  if (hasSwvArgs) {
+  if (hasDpvArgs) {
+    if (!applyDpvConfigFromRequest()) {
+      wifiServer.send(409, "application/json", F("{\"ok\":false,\"message\":\"Stop measurement before changing DPV parameters\"}"));
+      return;
+    }
+  } else if (hasSwvArgs) {
     if (!applySwvConfigFromRequest()) {
       wifiServer.send(409, "application/json", F("{\"ok\":false,\"message\":\"Stop measurement before changing SWV parameters\"}"));
       return;
@@ -3529,11 +3875,11 @@ static void handleMeasurementStartApi() {
     }
   }
 
-  if ((getMeasurementMode() == MEAS_MODE_CV || getMeasurementMode() == MEAS_MODE_SWV) && WiFi.status() == WL_CONNECTED && !rtcUtcSynced) {
+  if ((getMeasurementMode() == MEAS_MODE_CV || getMeasurementMode() == MEAS_MODE_SWV || getMeasurementMode() == MEAS_MODE_DPV) && WiFi.status() == WL_CONNECTED && !rtcUtcSynced) {
     syncUtcTimeFromNtpToRtc(5000);
   }
 
-  if ((getMeasurementMode() == MEAS_MODE_CV || getMeasurementMode() == MEAS_MODE_SWV) && !initSdCard()) {
+  if ((getMeasurementMode() == MEAS_MODE_CV || getMeasurementMode() == MEAS_MODE_SWV || getMeasurementMode() == MEAS_MODE_DPV) && !initSdCard()) {
     wifiServer.send(503, "application/json", F("{\"ok\":false,\"message\":\"SD card mount failed; measurement logging requires SD\"}"));
     return;
   }
@@ -3556,7 +3902,7 @@ static void handleMeasurementStopApi() {
 }
 
 static bool isSafeCvFilePath(const String &path) {
-  return (path.startsWith("/cv_") || path.startsWith("/swv_")) && path.endsWith(".bin") && path.indexOf("..") < 0;
+  return (path.startsWith("/cv_") || path.startsWith("/swv_") || path.startsWith("/dpv_")) && path.endsWith(".bin") && path.indexOf("..") < 0;
 }
 
 static String cvFilesJson() {
@@ -3624,7 +3970,7 @@ static void handleCvDownloadCsvApi() {
 
   CvBinHeader header;
   if (file.read((uint8_t *)&header, sizeof(header)) != sizeof(header) ||
-      (memcmp(header.magic, "POTCVB1", 7) != 0 && memcmp(header.magic, "POTSWV1", 7) != 0) ||
+      (memcmp(header.magic, "POTCVB1", 7) != 0 && memcmp(header.magic, "POTSWV1", 7) != 0 && memcmp(header.magic, "POTDPV1", 7) != 0) ||
       header.recordSize != sizeof(CvBinRecord)) {
     file.close();
     wifiServer.send(400, "application/json", F("{\"ok\":false,\"message\":\"Invalid CV binary file\"}"));
@@ -3637,7 +3983,17 @@ static void handleCvDownloadCsvApi() {
   wifiServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
   wifiServer.send(200, "text/csv", "");
 
-  if (memcmp(header.magic, "POTSWV1", 7) == 0) {
+  if (memcmp(header.magic, "POTDPV1", 7) == 0) {
+    wifiServer.sendContent(F("experiment_name,start_v,end_v,step_v,amplitude_v,period_ms,pulse_ms,quiet_ms\n"));
+    wifiServer.sendContent(String(header.experimentName) + "," +
+                           String(header.startV, 6) + "," +
+                           String(header.vertex1V, 6) + "," +
+                           String(header.stepV, 6) + "," +
+                           String(header.vertex2V, 6) + "," +
+                           String(header.scanRateVps, 6) + "," +
+                           String(header.finalV, 6) + "," +
+                           String(header.quietMs) + "\n\n");
+  } else if (memcmp(header.magic, "POTSWV1", 7) == 0) {
     float periodMs = 1000.0f / header.scanRateVps;
     float dutyMs = periodMs * header.finalV * 0.01f;
     wifiServer.sendContent(F("experiment_name,start_v,end_v,step_v,amplitude_v,frequency_hz,period_ms,duty_ms,duty_percent,quiet_ms\n"));
@@ -3771,6 +4127,7 @@ static void startWifiWebServer() {
   wifiServer.on("/api/measurement/mode", HTTP_POST, []() { handleMeasurementModeApi(); });
   wifiServer.on("/api/measurement/cv", HTTP_POST, []() { handleCvConfigApi(); });
   wifiServer.on("/api/measurement/swv", HTTP_POST, []() { handleSwvConfigApi(); });
+  wifiServer.on("/api/measurement/dpv", HTTP_POST, []() { handleDpvConfigApi(); });
   wifiServer.on("/api/measurement/start", HTTP_POST, []() { handleMeasurementStartApi(); });
   wifiServer.on("/api/measurement/stop", HTTP_POST, []() { handleMeasurementStopApi(); });
   wifiServer.on("/api/cv/files", HTTP_GET, []() { handleCvFilesApi(); });
@@ -4121,7 +4478,7 @@ void setup() {
   digitalWrite(LED_BUILTIN_PIN, LOW);
 
   vibrationBegin();
-  vibrationPulse(50, 300); 
+  vibrationPulse(30, 300); 
   
   // ------------------------------
   // FreeRTOS objects first
@@ -4252,6 +4609,7 @@ void setup() {
   Serial.println("  2 = select HOLD_CENTER mode (2.048V repeated)");
   Serial.println("  3 = select CV mode (web parameters)");
   Serial.println("  4 = select SWV mode (web parameters)");
+  Serial.println("  5 = select DPV mode (web parameters)");
   Serial.println("  m = print selected measurement mode");
   Serial.println("  p = print LMP91000 registers");
   Serial.println("  g = set TIA range back to 35k");

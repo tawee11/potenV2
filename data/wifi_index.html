@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>smart-ec WiFi Manager</title>
+  <title>smart-ec Control</title>
   <style>
     :root{--bg:#f4f8fb;--panel:#fff;--ink:#142033;--muted:#66758c;--line:#d9e5f4;--primary:#0f766e;--accent:#38bdf8;--ok:#138a4d;--warn:#b45309;--danger:#dc2626;--soft:#f7fbff;--shadow:0 14px 40px rgba(22,45,82,.12);--radius:16px}
-    *{box-sizing:border-box}body{margin:0;min-height:100vh;font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--ink);background:var(--bg)}.wrap{width:min(1040px,100%);margin:auto;padding:18px}.hero,.grid{display:grid;gap:14px;grid-template-columns:1.2fr .8fr}.card,.brand,.status-card{background:var(--panel);border:1px solid var(--line);box-shadow:var(--shadow);border-radius:var(--radius);padding:18px}.brand h1{margin:8px 0;font-size:40px}.brand p,.small{color:var(--muted);line-height:1.45}.chip{display:inline-flex;padding:6px 10px;border-radius:999px;background:#dffaf3;color:#075e54;font-size:13px;font-weight:800}.status-row{display:flex;gap:12px;align-items:center}.dot{width:12px;height:12px;border-radius:50%;background:var(--warn)}.dot.ok{background:var(--ok)}.status-title{font-weight:850}.status-sub{font-size:14px;color:var(--muted);margin-top:5px;word-break:break-word}.field{margin:10px 0}.label{display:block;font-size:13px;font-weight:800;color:#334155;margin-bottom:6px}input,select{width:100%;border:1px solid var(--line);border-radius:12px;padding:11px 12px;font-size:15px;background:#fff;outline:none}input:focus,select:focus{border-color:#0d9488;box-shadow:0 0 0 3px rgba(20,184,166,.14)}.check{display:flex;gap:10px;align-items:center;padding:11px 12px;border:1px solid var(--line);border-radius:12px;background:var(--soft)}.check input{width:auto}.actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:12px}button{border:0;border-radius:12px;padding:11px 13px;font-weight:850;font-size:14px;cursor:pointer;background:#e7f0fb;color:#1f365c}button.primary{background:linear-gradient(135deg,var(--primary),var(--accent));color:#fff}button.danger{background:#fee2e2;color:var(--danger)}button.ghost{background:#f3f7fb;color:#334155}.list{display:grid;gap:10px}.item,.scan{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;border:1px solid var(--line);border-radius:14px;padding:12px;background:#fff}.ssid{font-weight:900}.meta,.rssi{color:var(--muted);font-size:13px}.scan-list{max-height:340px;overflow:auto;display:grid;gap:9px}.hide{display:none!important}.toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);max-width:min(92vw,520px);background:#111827;color:#fff;padding:13px 16px;border-radius:14px;box-shadow:var(--shadow);opacity:0;pointer-events:none;transition:.2s}.toast.show{opacity:1}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--ink);background:var(--bg)}.wrap{width:min(1040px,100%);margin:auto;padding:14px}.hero,.grid{display:grid;gap:14px;grid-template-columns:1.2fr .8fr}.card,.brand,.status-card{background:var(--panel);border:1px solid var(--line);box-shadow:var(--shadow);border-radius:var(--radius);padding:18px}.brand,.status-card{padding:12px 14px}.brand h1{margin:4px 0;font-size:28px}.brand p,.small{color:var(--muted);line-height:1.45}.brand p{margin:0;font-size:14px}.chip{display:inline-flex;padding:4px 9px;border-radius:999px;background:#dffaf3;color:#075e54;font-size:12px;font-weight:800}.status-row{display:flex;gap:10px;align-items:center}.dot{width:10px;height:10px;border-radius:50%;background:var(--warn)}.dot.ok{background:var(--ok)}.status-title{font-weight:850}.status-sub{font-size:13px;color:var(--muted);margin-top:3px;word-break:break-word}.field{margin:10px 0}.label{display:block;font-size:13px;font-weight:800;color:#334155;margin-bottom:6px}input,select{width:100%;border:1px solid var(--line);border-radius:12px;padding:11px 12px;font-size:15px;background:#fff;outline:none}input:focus,select:focus{border-color:#0d9488;box-shadow:0 0 0 3px rgba(20,184,166,.14)}.check{display:flex;gap:10px;align-items:center;padding:11px 12px;border:1px solid var(--line);border-radius:12px;background:var(--soft)}.check input{width:auto}.actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:12px}button{border:0;border-radius:12px;padding:11px 13px;font-weight:850;font-size:14px;cursor:pointer;background:#e7f0fb;color:#1f365c}button.primary{background:linear-gradient(135deg,var(--primary),var(--accent));color:#fff}button.danger{background:#fee2e2;color:var(--danger)}button.ghost{background:#f3f7fb;color:#334155}button.active,.tab.active{background:#0f766e;color:#fff}.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.tab{min-width:112px;background:#e7f0fb;color:#1f365c}.tab-panel{display:block}.list{display:grid;gap:10px}.item,.scan{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;border:1px solid var(--line);border-radius:14px;padding:12px;background:#fff}.ssid{font-weight:900}.meta,.rssi{color:var(--muted);font-size:13px}.scan-list{max-height:340px;overflow:auto;display:grid;gap:9px}.hide{display:none!important}.toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);max-width:min(92vw,520px);background:#111827;color:#fff;padding:13px 16px;border-radius:14px;box-shadow:var(--shadow);opacity:0;pointer-events:none;transition:.2s}.toast.show{opacity:1}
     @media(max-width:820px){.hero,.grid{grid-template-columns:1fr}.wrap{padding:12px}.brand h1{font-size:32px}}
   </style>
 </head>
@@ -15,8 +15,8 @@
     <section class="hero">
       <div class="brand">
         <span class="chip">smart-ec</span>
-        <h1>WiFi Manager</h1>
-        <p>Configure WiFi and run potentiostat measurement modes from the ESP32-S3 controller.</p>
+        <h1>smart-ec Control</h1>
+        <p>Potentiostat measurement, files, network, and maintenance.</p>
       </div>
       <div class="status-card">
         <div class="status-row"><span id="dot" class="dot"></span><div><div id="statusTitle" class="status-title">Checking...</div><div id="statusSub" class="status-sub">Reading device status</div></div></div>
@@ -25,6 +25,15 @@
       </div>
     </section>
 
+    <nav class="tabs" aria-label="Main sections">
+      <button id="tabMeasure" class="tab active" type="button" onclick="showTab('measure')">Measure</button>
+      <button id="tabFiles" class="tab" type="button" onclick="showTab('files')">Files</button>
+      <button id="tabWifi" class="tab" type="button" onclick="showTab('wifi')">WiFi</button>
+      <button id="tabMaintenance" class="tab" type="button" onclick="showTab('maintenance')">Maintenance</button>
+      <button id="tabHelp" class="tab" type="button" onclick="showTab('help')">Help</button>
+    </nav>
+
+    <div id="panelWifi" class="tab-panel hide">
     <section class="grid">
       <div class="card">
         <h2>Add or Update Network</h2>
@@ -50,7 +59,9 @@
       </div>
       <div id="scanList" class="scan-list" style="margin-top:10px"><p class="small">No scan has been run yet.</p></div>
     </section>
+    </div>
 
+    <div id="panelMeasure" class="tab-panel">
     <section class="card" style="margin-top:14px">
       <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap">
         <div>
@@ -58,16 +69,14 @@
           <p id="measurementStatus" class="small">Loading measurement status...</p>
         </div>
         <div class="actions" style="margin-top:0">
-          <button class="ghost" onclick="setMode('SWEEP')">Sweep</button>
-          <button class="ghost" onclick="setMode('HOLD_CENTER')">Hold Center</button>
-          <button class="ghost" onclick="setMode('CV')">CV</button>
-          <button class="ghost" onclick="setMode('SWV')">SWV</button>
-          <button class="primary" onclick="startMeasurement()">Start</button>
-          <button class="danger" onclick="stopMeasurement()">Stop</button>
+          <button id="modeCV" class="ghost" onclick="setMode('CV')">CV</button>
+          <button id="modeSWV" class="ghost" onclick="setMode('SWV')">SWV</button>
+          <button id="modeDPV" class="ghost" onclick="setMode('DPV')">DPV</button>
         </div>
       </div>
       <div id="measurementLatest" class="small"></div>
-      <form id="cvForm" style="margin-top:14px">
+      <p id="modeHint" class="small"></p>
+      <form id="cvForm" class="mode-form hide" style="margin-top:14px">
         <div class="field"><label class="label" for="cvExperiment">Experiment name</label><input id="cvExperiment" name="experiment_name" type="text" maxlength="31" placeholder="empty = timestamp filename"></div>
         <div class="grid">
           <div class="field"><label class="label" for="cvStart">Start V</label><input id="cvStart" name="start_v" type="number" step="0.001" min="-2.048" max="2.048" value="0.000"></div>
@@ -81,7 +90,7 @@
         </div>
         <div class="actions"><button class="primary" type="submit">Start CV</button><button class="ghost" type="button" onclick="saveCvConfig()">Save CV Params</button></div>
       </form>
-      <form id="swvForm" style="margin-top:14px">
+      <form id="swvForm" class="mode-form hide" style="margin-top:14px">
         <h3 style="margin:0 0 8px">SWV</h3>
         <div class="field"><label class="label" for="swvExperiment">Experiment name</label><input id="swvExperiment" name="experiment_name" type="text" maxlength="31" placeholder="empty = timestamp filename"></div>
         <div class="grid">
@@ -115,14 +124,99 @@
         </div>
         <div class="actions"><button class="primary" type="submit">Start SWV</button><button class="ghost" type="button" onclick="saveSwvConfig()">Save SWV Params</button></div>
       </form>
-      <div style="margin-top:14px">
-        <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap">
-          <h3 style="margin:0">Measurement Files</h3>
-          <button class="ghost" onclick="loadCvFiles()">Refresh Files</button>
+      <form id="dpvForm" class="mode-form hide" style="margin-top:14px">
+        <h3 style="margin:0 0 8px">DPV</h3>
+        <div class="field"><label class="label" for="dpvExperiment">Experiment name</label><input id="dpvExperiment" name="experiment_name" type="text" maxlength="31" placeholder="empty = timestamp filename"></div>
+        <div class="grid">
+          <div class="field"><label class="label" for="dpvStart">Start V</label><input id="dpvStart" name="start_v" type="number" step="0.001" min="-2.048" max="2.048" value="-0.500"></div>
+          <div class="field"><label class="label" for="dpvEnd">End V</label><input id="dpvEnd" name="end_v" type="number" step="0.001" min="-2.048" max="2.048" value="0.500"></div>
+          <div class="field"><label class="label" for="dpvStep">Step V</label><input id="dpvStep" name="step_v" type="number" step="0.001" min="0.001" max="0.250" value="0.005"></div>
+          <div class="field"><label class="label" for="dpvAmplitude">Pulse amplitude V</label><input id="dpvAmplitude" name="amplitude_v" type="number" step="0.001" min="0.001" max="1.000" value="0.050"></div>
+          <div class="field"><label class="label" for="dpvPeriod">Period ms</label><input id="dpvPeriod" name="period_ms" type="number" step="0.1" min="2" max="10000" value="500.0"></div>
+          <div class="field"><label class="label" for="dpvPulse">Pulse time ms</label><input id="dpvPulse" name="pulse_ms" type="number" step="0.1" min="0.1" max="10000" value="50.0"></div>
+          <div class="field"><label class="label" for="dpvQuiet">Quiet ms</label><input id="dpvQuiet" name="quiet_ms" type="number" step="100" min="0" max="600000" value="0"></div>
         </div>
-        <div id="cvFiles" class="list" style="margin-top:10px"><p class="small">No file list loaded.</p></div>
+        <div style="margin-top:10px">
+          <label class="check"><input id="dpvConditioningEnabled" name="conditioning_enabled" type="checkbox" value="1" onchange="toggleDpvConditioning()"><span>Enable conditioning</span></label>
+          <div id="dpvConditioningBox" class="hide">
+            <div class="grid">
+              <div class="field"><label class="label" for="dpvConditioningV">Conditioning voltage V</label><input id="dpvConditioningV" name="conditioning_v" type="number" step="0.001" min="-2.048" max="2.048" value="0.000"></div>
+              <div class="field"><label class="label" for="dpvConditioningMs">Conditioning time ms</label><input id="dpvConditioningMs" name="conditioning_ms" type="number" step="100" min="0" max="600000" value="60000"></div>
+              <div class="field"><label class="label" for="dpvSettleAfterMs">Settle after motor ms</label><input id="dpvSettleAfterMs" name="settle_after_ms" type="number" step="100" min="0" max="60000" value="2000"></div>
+            </div>
+            <label class="check"><input id="dpvAgitationEnabled" name="agitation_enabled" type="checkbox" value="1" onchange="toggleDpvAgitation()"><span>Agitate during conditioning</span></label>
+            <div id="dpvAgitationBox" class="grid hide">
+              <div class="field"><label class="label" for="dpvAgitationOnMs">Motor ON ms</label><input id="dpvAgitationOnMs" name="agitation_on_ms" type="number" step="100" min="100" max="600000" value="2000"></div>
+              <div class="field"><label class="label" for="dpvAgitationOffMs">Motor OFF ms</label><input id="dpvAgitationOffMs" name="agitation_off_ms" type="number" step="100" min="100" max="600000" value="3000"></div>
+              <div class="field"><label class="label" for="dpvMotorPower">Motor power %</label><input id="dpvMotorPower" name="motor_power_percent" type="number" step="1" min="0" max="100" value="60"></div>
+            </div>
+          </div>
+        </div>
+        <div class="actions"><button class="primary" type="submit">Start DPV</button><button class="ghost" type="button" onclick="saveDpvConfig()">Save DPV Params</button></div>
+      </form>
+    </section>
+    </div>
+
+    <div id="panelMaintenance" class="tab-panel hide">
+    <section class="card" style="margin-top:14px">
+      <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap">
+        <div>
+          <h2 style="margin:0">Maintenance</h2>
+          <p class="small">Service controls and firmware tools.</p>
+        </div>
+        <div class="actions" style="margin-top:0">
+          <button id="modeSWEEP" class="ghost" onclick="setMode('SWEEP')">Sweep</button>
+          <button id="modeHOLD_CENTER" class="ghost" onclick="setMode('HOLD_CENTER')">Hold Center</button>
+          <button class="primary" onclick="startMeasurement()">Start</button>
+          <button class="danger" onclick="stopMeasurement()">Stop</button>
+        </div>
+      </div>
+      <div class="grid" style="margin-top:14px">
+        <div style="border:1px solid var(--line);border-radius:14px;padding:14px;background:var(--soft)">
+          <h3 style="margin:0 0 8px">Basic Test</h3>
+          <p class="small">Sweep and Hold Center use the firmware test modes.</p>
+        </div>
+        <div style="border:1px solid var(--line);border-radius:14px;padding:14px;background:var(--soft)">
+          <h3 style="margin:0 0 8px">OTA Update</h3>
+          <p class="small">Reserved for firmware update tools.</p>
+        </div>
       </div>
     </section>
+    </div>
+
+    <div id="panelHelp" class="tab-panel hide">
+    <section class="card" style="margin-top:14px">
+      <h2 style="margin:0">Help</h2>
+      <div class="grid" style="margin-top:14px">
+        <div style="border:1px solid var(--line);border-radius:14px;padding:14px;background:var(--soft)">
+          <h3 style="margin:0 0 8px">Measure</h3>
+          <p class="small">Use CV, SWV, or DPV to set parameters, save settings, and start a measurement. Measurement files are saved as BIN on the SD card.</p>
+        </div>
+        <div style="border:1px solid var(--line);border-radius:14px;padding:14px;background:var(--soft)">
+          <h3 style="margin:0 0 8px">Files</h3>
+          <p class="small">Download BIN for raw data, CSV for user data, or delete old measurement files from the SD card.</p>
+        </div>
+        <div style="border:1px solid var(--line);border-radius:14px;padding:14px;background:var(--soft)">
+          <h3 style="margin:0 0 8px">WiFi</h3>
+          <p class="small">Add, update, scan, or remove saved WiFi networks. The device uses WiFi time sync before RTC timestamped files.</p>
+        </div>
+        <div style="border:1px solid var(--line);border-radius:14px;padding:14px;background:var(--soft)">
+          <h3 style="margin:0 0 8px">Maintenance</h3>
+          <p class="small">Use Sweep and Hold Center for basic device checks. OTA update controls will live here later.</p>
+        </div>
+      </div>
+    </section>
+    </div>
+
+    <div id="panelFiles" class="tab-panel hide">
+    <section class="card" style="margin-top:14px">
+      <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap">
+        <h2 style="margin:0">Measurement Files</h2>
+        <button class="ghost" onclick="loadCvFiles()">Refresh Files</button>
+      </div>
+      <div id="cvFiles" class="list" style="margin-top:10px"><p class="small">No file list loaded.</p></div>
+    </section>
+    </div>
   </div>
   <div id="toast" class="toast"></div>
 
@@ -130,8 +224,28 @@
 const $ = (id) => document.getElementById(id);
 let measurementStateKnown=false;
 let measurementWasActive=false;
+let activeMeasurementMode='CV';
 function toast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2200); }
 async function getJson(url, opts={}){ const r=await fetch(url, opts); if(!r.ok) throw new Error(await r.text()); return await r.json(); }
+function showTab(name){
+  ['measure','files','wifi','maintenance','help'].forEach((key)=>{
+    $('panel'+key.charAt(0).toUpperCase()+key.slice(1)).classList.toggle('hide', key!==name);
+    $('tab'+key.charAt(0).toUpperCase()+key.slice(1)).classList.toggle('active', key===name);
+  });
+  if(name==='files') loadCvFiles();
+  if(name==='measure' && (activeMeasurementMode==='SWEEP' || activeMeasurementMode==='HOLD_CENTER')) setMode('CV');
+}
+function updateModeForms(mode){
+  activeMeasurementMode=mode||activeMeasurementMode;
+  $('cvForm').classList.toggle('hide', activeMeasurementMode!=='CV');
+  $('swvForm').classList.toggle('hide', activeMeasurementMode!=='SWV');
+  $('dpvForm').classList.toggle('hide', activeMeasurementMode!=='DPV');
+  ['SWEEP','HOLD_CENTER','CV','SWV','DPV'].forEach((key)=>{
+    const btn=$('mode'+key);
+    if(btn) btn.classList.toggle('active', key===activeMeasurementMode);
+  });
+  $('modeHint').textContent=(activeMeasurementMode==='SWEEP' || activeMeasurementMode==='HOLD_CENTER') ? 'No parameter form for this mode.' : '';
+}
 function toggleEnterprise(){ $('enterpriseBox').classList.toggle('hide', !$('enterprise').checked); }
 function togglePass(){ $('pass').type = $('pass').type === 'password' ? 'text':'password'; }
 function clearForm(){ $('wifiForm').reset(); toggleEnterprise(); }
@@ -153,6 +267,14 @@ function toggleSwvAgitation(){
   const enabled=$('swvAgitationEnabled').checked;
   $('swvAgitationBox').classList.toggle('hide', !enabled);
 }
+function toggleDpvConditioning(){
+  const enabled=$('dpvConditioningEnabled').checked;
+  $('dpvConditioningBox').classList.toggle('hide', !enabled);
+}
+function toggleDpvAgitation(){
+  const enabled=$('dpvAgitationEnabled').checked;
+  $('dpvAgitationBox').classList.toggle('hide', !enabled);
+}
 async function loadStatus(){
   try{ const s=await getJson('/api/status'); $('dot').classList.toggle('ok', s.connected); $('statusTitle').textContent=s.connected?'Connected':'Setup Portal Active'; $('statusSub').textContent=s.connected?`${s.sta_ssid} - ${s.ip}`:'Not connected to WiFi yet'; $('apInfo').innerHTML=s.ap_active?`AP: <b>${s.ap_ssid}</b><br>Password: <b>${s.ap_password}</b><br>Open: <b>192.168.4.1</b>`:`Saved networks: ${s.saved_count}`; }
   catch(e){ $('statusTitle').textContent='Status error'; $('statusSub').textContent=e.message; }
@@ -173,6 +295,7 @@ async function loadMeasurement(){
   try{
     const m=await getJson('/api/measurement/status');
     const measurementActive=!!(m.running || m.busy || m.cv_log_active || m.sd_log_file_open);
+    updateModeForms(m.mode);
     $('measurementStatus').textContent=`${m.running?'Running':'Stopped'} - mode ${m.mode}${m.busy?' - sampling':''} - SD ${m.sd_mounted?'OK':'not mounted'} - RTC ${m.rtc_utc_synced?'UTC synced':'not synced'} - ${m.cv_file||''}`;
     if(m.latest){
       $('measurementLatest').innerHTML=`Latest: ${escapeHtml(m.latest.mode)} - ${escapeHtml(m.latest.direction)} - E ${Number(m.latest.potential_v||0).toFixed(3)} V - DAC ${Number(m.latest.dac_set_v).toFixed(3)} V - ADC ${Number(m.latest.adc_v).toFixed(6)} V - I ${(Number(m.latest.current_a)*1000000).toFixed(3)} uA - records ${m.sd_records_written}/${m.sd_records_dropped}`;
@@ -185,6 +308,9 @@ async function loadMeasurement(){
     if(m.swv_config && !$('swvForm').dataset.dirty){
       $('swvExperiment').value=m.swv_config.experiment_name||''; $('swvStart').value=Number(m.swv_config.start_v).toFixed(3); $('swvEnd').value=Number(m.swv_config.end_v).toFixed(3); $('swvStep').value=Number(m.swv_config.step_v).toFixed(3); $('swvAmplitude').value=Number(m.swv_config.amplitude_v).toFixed(3); $('swvTimingMode').value=m.swv_config.timing_mode||'period'; $('swvFrequency').value=Number(m.swv_config.frequency_hz).toFixed(1); $('swvPeriod').value=Number(m.swv_config.period_ms).toFixed(1); $('swvDutyMode').value=m.swv_config.duty_mode||'time'; $('swvDutyMs').value=Number(m.swv_config.duty_ms).toFixed(1); $('swvDutyPercent').value=Number(m.swv_config.duty_percent).toFixed(1); $('swvQuiet').value=m.swv_config.quiet_ms; $('swvConditioningEnabled').checked=!!m.swv_config.conditioning_enabled; $('swvConditioningV').value=Number(m.swv_config.conditioning_v||0).toFixed(3); $('swvConditioningMs').value=m.swv_config.conditioning_ms||60000; $('swvAgitationEnabled').checked=!!m.swv_config.agitation_enabled; $('swvAgitationOnMs').value=m.swv_config.agitation_on_ms||2000; $('swvAgitationOffMs').value=m.swv_config.agitation_off_ms||3000; $('swvMotorPower').value=m.swv_config.motor_power_percent||60; $('swvSettleAfterMs').value=m.swv_config.settle_after_ms||2000; toggleSwvTiming(); toggleSwvDuty(); toggleSwvConditioning(); toggleSwvAgitation();
     }
+    if(m.dpv_config && !$('dpvForm').dataset.dirty){
+      $('dpvExperiment').value=m.dpv_config.experiment_name||''; $('dpvStart').value=Number(m.dpv_config.start_v).toFixed(3); $('dpvEnd').value=Number(m.dpv_config.end_v).toFixed(3); $('dpvStep').value=Number(m.dpv_config.step_v).toFixed(3); $('dpvAmplitude').value=Number(m.dpv_config.amplitude_v).toFixed(3); $('dpvPeriod').value=Number(m.dpv_config.period_ms).toFixed(1); $('dpvPulse').value=Number(m.dpv_config.pulse_ms).toFixed(1); $('dpvQuiet').value=m.dpv_config.quiet_ms; $('dpvConditioningEnabled').checked=!!m.dpv_config.conditioning_enabled; $('dpvConditioningV').value=Number(m.dpv_config.conditioning_v||0).toFixed(3); $('dpvConditioningMs').value=m.dpv_config.conditioning_ms||60000; $('dpvAgitationEnabled').checked=!!m.dpv_config.agitation_enabled; $('dpvAgitationOnMs').value=m.dpv_config.agitation_on_ms||2000; $('dpvAgitationOffMs').value=m.dpv_config.agitation_off_ms||3000; $('dpvMotorPower').value=m.dpv_config.motor_power_percent||60; $('dpvSettleAfterMs').value=m.dpv_config.settle_after_ms||2000; toggleDpvConditioning(); toggleDpvAgitation();
+    }
     if(measurementStateKnown && measurementWasActive && !measurementActive){
       loadCvFiles();
     }
@@ -192,7 +318,7 @@ async function loadMeasurement(){
     measurementStateKnown=true;
   }catch(e){ $('measurementStatus').textContent='Measurement status error: '+e.message; }
 }
-async function setMode(mode){ await getJson('/api/measurement/mode',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'mode='+encodeURIComponent(mode)}); toast('Mode set to '+mode); loadMeasurement(); }
+async function setMode(mode){ updateModeForms(mode); await getJson('/api/measurement/mode',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'mode='+encodeURIComponent(mode)}); toast('Mode set to '+mode); loadMeasurement(); }
 async function startMeasurement(){ await getJson('/api/measurement/start',{method:'POST'}); toast('Measurement started'); loadMeasurement(); }
 async function stopMeasurement(){ await getJson('/api/measurement/stop',{method:'POST'}); toast('Measurement stopped'); loadMeasurement(); }
 async function loadCvFiles(){
@@ -238,8 +364,17 @@ function cvBinToCsv(buffer){
   const headerSize=view.getUint16(10,true);
   const recordSize=view.getUint32(12,true);
   const magic=readCString(view,0,8);
-  if((magic!=='POTCVB1' && magic!=='POTSWV1') || headerSize!==104 || recordSize!==56) throw new Error('Invalid measurement binary format');
-  const header=magic==='POTSWV1' ? [
+  if((magic!=='POTCVB1' && magic!=='POTSWV1' && magic!=='POTDPV1') || headerSize!==104 || recordSize!==56) throw new Error('Invalid measurement binary format');
+  const header=magic==='POTDPV1' ? [
+    ['experiment_name',readCString(view,68,32)],
+    ['start_v',view.getFloat32(36,true)],
+    ['end_v',view.getFloat32(40,true)],
+    ['step_v',view.getFloat32(52,true)],
+    ['amplitude_v',view.getFloat32(44,true)],
+    ['period_ms',view.getFloat32(56,true)],
+    ['pulse_ms',view.getFloat32(48,true)],
+    ['quiet_ms',view.getUint32(64,true)]
+  ] : magic==='POTSWV1' ? [
     ['experiment_name',readCString(view,68,32)],
     ['start_v',view.getFloat32(36,true)],
     ['end_v',view.getFloat32(40,true)],
@@ -300,18 +435,28 @@ function swvParams(){
   fd.set('agitation_enabled',$('swvAgitationEnabled').checked?'1':'0');
   return new URLSearchParams(fd);
 }
+function dpvParams(){
+  const fd=new FormData($('dpvForm'));
+  fd.set('mode','DPV');
+  fd.set('conditioning_enabled',$('dpvConditioningEnabled').checked?'1':'0');
+  fd.set('agitation_enabled',$('dpvAgitationEnabled').checked?'1':'0');
+  return new URLSearchParams(fd);
+}
 async function saveCvConfig(){ await getJson('/api/measurement/cv',{method:'POST',body:cvParams()}); $('cvForm').dataset.dirty=''; toast('CV parameters saved'); loadMeasurement(); }
 async function saveSwvConfig(){ await getJson('/api/measurement/swv',{method:'POST',body:swvParams()}); $('swvForm').dataset.dirty=''; toast('SWV parameters saved'); loadMeasurement(); }
+async function saveDpvConfig(){ await getJson('/api/measurement/dpv',{method:'POST',body:dpvParams()}); $('dpvForm').dataset.dirty=''; toast('DPV parameters saved'); loadMeasurement(); }
 $('cvForm').addEventListener('input',()=>{$('cvForm').dataset.dirty='1';});
 $('cvForm').addEventListener('submit',async(ev)=>{ ev.preventDefault(); await getJson('/api/measurement/start',{method:'POST',body:cvParams()}); $('cvForm').dataset.dirty=''; toast('CV started'); loadMeasurement(); });
 $('swvForm').addEventListener('input',()=>{$('swvForm').dataset.dirty='1';});
 $('swvForm').addEventListener('submit',async(ev)=>{ ev.preventDefault(); await getJson('/api/measurement/start',{method:'POST',body:swvParams()}); $('swvForm').dataset.dirty=''; toast('SWV started'); loadMeasurement(); });
+$('dpvForm').addEventListener('input',()=>{$('dpvForm').dataset.dirty='1';});
+$('dpvForm').addEventListener('submit',async(ev)=>{ ev.preventDefault(); await getJson('/api/measurement/start',{method:'POST',body:dpvParams()}); $('dpvForm').dataset.dirty=''; toast('DPV started'); loadMeasurement(); });
 function selectSsid(ssid){ $('ssid').value=ssid; $('pass').focus(); toast('SSID selected'); }
 $('wifiForm').addEventListener('submit', async (ev)=>{ ev.preventDefault(); const fd=new FormData(ev.target); if(!$('enterprise').checked) fd.delete('enterprise'); try{ const r=await fetch('/api/save',{method:'POST',body:new URLSearchParams(fd)}); const j=await r.json(); toast(j.message||'Saved'); setTimeout(refreshAll,1400); }catch(e){toast('Save error: '+e.message);} });
 function refreshAll(){ loadStatus(); loadNetworks(); loadMeasurement(); loadCvFiles(); }
 function escapeHtml(s){ return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 function jsString(s){ return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\n/g,''); }
-toggleEnterprise(); toggleSwvTiming(); toggleSwvDuty(); toggleSwvConditioning(); toggleSwvAgitation(); refreshAll(); setInterval(loadStatus,5000); setInterval(loadMeasurement,1500);
+toggleEnterprise(); updateModeForms('CV'); showTab('measure'); toggleSwvTiming(); toggleSwvDuty(); toggleSwvConditioning(); toggleSwvAgitation(); toggleDpvConditioning(); toggleDpvAgitation(); refreshAll(); setInterval(loadStatus,5000); setInterval(loadMeasurement,1500);
 </script>
 </body>
 </html>
