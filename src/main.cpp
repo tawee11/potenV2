@@ -342,6 +342,7 @@ static TaskHandle_t sdWriterTaskHandle = nullptr;
 static const UBaseType_t MEAS_PRIORITY_IDLE = 1;
 static const UBaseType_t MEAS_PRIORITY_RUN  = 5;
 static const UBaseType_t OPTION_PRIORITY    = 2;
+static void resetMeasurementProgress(uint16_t totalCycles);
 
 static QueueHandle_t loggerQueue = nullptr;
 static QueueHandle_t sdRecordQueue = nullptr;
@@ -358,6 +359,10 @@ volatile bool measurementBusy = false;
 volatile bool measurementStopRequested = true;
 volatile bool measurementPriorityIsHigh = false;
 volatile bool serialDebugMode = false;
+volatile bool measurementCompleted = false;
+volatile uint16_t measurementCycleCurrent = 0;
+volatile uint16_t measurementCycleTotal = 0;
+volatile uint16_t measurementProgressPermille = 0;
 static bool serialCsvHeaderPrinted = false;
 static bool serialDebugModeLastReported = false;
 static uint32_t lastSerialInputMs = 0;
@@ -407,6 +412,7 @@ void requestMeasurementRun() {
   // When idle, MeasurementTask is blocked in ulTaskNotifyTake() and uses no CPU time.
   measurementStopRequested = false;
   measurementEnabled = true;
+  resetMeasurementProgress(0);
 
   setMeasurementPriority(true);
 
@@ -648,6 +654,26 @@ volatile bool tftFullRefreshRequested = false;
 volatile bool tftRunButtonRefreshRequested = false;
 volatile bool tftDrawMeasurementRequested = false;
 
+static bool measurementSessionActive() {
+  return measurementEnabled || measurementBusy;
+}
+
+static void resetMeasurementProgress(uint16_t totalCycles) {
+  measurementCompleted = false;
+  measurementCycleCurrent = 0;
+  measurementCycleTotal = totalCycles;
+  measurementProgressPermille = 0;
+}
+
+static void setMeasurementProgress(uint32_t doneSteps, uint32_t totalSteps) {
+  if (totalSteps == 0) {
+    measurementProgressPermille = 0;
+    return;
+  }
+  if (doneSteps > totalSteps) doneSteps = totalSteps;
+  measurementProgressPermille = (uint16_t)((doneSteps * 1000UL) / totalSteps);
+}
+
 void requestTftFullRefresh() {
   tftFullRefreshRequested = true;
   tftRunButtonRefreshRequested = true;
@@ -737,6 +763,7 @@ static bool setMeasurementMode(MeasurementMode mode) {
   }
 
   currentMeasurementMode = mode;
+  resetMeasurementProgress(0);
   return true;
 }
 
@@ -1552,7 +1579,7 @@ static void runHoldCenterMode(uint32_t &sampleIndex) {
   }
 }
 
-static bool runCvSegment(float fromV, float toV, uint32_t targetIntervalUs, uint32_t &sampleIndex) {
+static bool runCvSegment(float fromV, float toV, uint32_t targetIntervalUs, uint32_t &sampleIndex, uint32_t progressBaseSteps, uint32_t progressSegmentSteps, uint32_t progressTotalSteps) {
   float step = fabsf(cvConfig.stepV);
   if (step < 0.0005f) step = 0.0005f;
 
@@ -1586,6 +1613,7 @@ static bool runCvSegment(float fromV, float toV, uint32_t targetIntervalUs, uint
     }
 
     measureAdcAtCurrentDac(MEAS_MODE_CV, dacV, direction, sampleIndex);
+    setMeasurementProgress(progressBaseSteps + min(currentStep, progressSegmentSteps), progressTotalSteps);
 
     if (currentStep >= totalSteps) {
       return true;
@@ -1639,22 +1667,33 @@ static void runCvMode(uint32_t &sampleIndex) {
   uint32_t targetIntervalUs = (uint32_t)((cvConfig.stepV / cvConfig.scanRateVps) * 1000000.0f);
   if (targetIntervalUs < 1000) targetIntervalUs = 1000;
 
+  uint32_t seg1Steps = (uint32_t)ceilf(fabsf(cvConfig.vertex1V - cvConfig.startV) / cvConfig.stepV);
+  uint32_t seg2Steps = (uint32_t)ceilf(fabsf(cvConfig.vertex2V - cvConfig.vertex1V) / cvConfig.stepV);
+  uint32_t seg3Steps = (uint32_t)ceilf(fabsf(cvConfig.finalV - cvConfig.vertex2V) / cvConfig.stepV);
+  uint32_t stepsPerCycle = seg1Steps + seg2Steps + seg3Steps;
+  uint32_t totalProgressSteps = stepsPerCycle * cvConfig.cycles;
+  if (totalProgressSteps == 0) totalProgressSteps = 1;
+  measurementCycleTotal = cvConfig.cycles;
+  measurementProgressPermille = 0;
+
   bool cvCompleted = true;
   for (uint16_t cycle = 0; cycle < cvConfig.cycles && measurementEnabled && !measurementStopRequested; cycle++) {
+    measurementCycleCurrent = cycle + 1;
+    uint32_t cycleBaseSteps = (uint32_t)cycle * stepsPerCycle;
     Serial.print("CV cycle ");
     Serial.print(cycle + 1);
     Serial.print("/");
     Serial.println(cvConfig.cycles);
 
-    if (!runCvSegment(cvConfig.startV, cvConfig.vertex1V, targetIntervalUs, sampleIndex)) {
+    if (!runCvSegment(cvConfig.startV, cvConfig.vertex1V, targetIntervalUs, sampleIndex, cycleBaseSteps, seg1Steps, totalProgressSteps)) {
       cvCompleted = false;
       break;
     }
-    if (!runCvSegment(cvConfig.vertex1V, cvConfig.vertex2V, targetIntervalUs, sampleIndex)) {
+    if (!runCvSegment(cvConfig.vertex1V, cvConfig.vertex2V, targetIntervalUs, sampleIndex, cycleBaseSteps + seg1Steps, seg2Steps, totalProgressSteps)) {
       cvCompleted = false;
       break;
     }
-    if (!runCvSegment(cvConfig.vertex2V, cvConfig.finalV, targetIntervalUs, sampleIndex)) {
+    if (!runCvSegment(cvConfig.vertex2V, cvConfig.finalV, targetIntervalUs, sampleIndex, cycleBaseSteps + seg1Steps + seg2Steps, seg3Steps, totalProgressSteps)) {
       cvCompleted = false;
       break;
     }
@@ -1666,6 +1705,8 @@ static void runCvMode(uint32_t &sampleIndex) {
   setMeasurementPriority(false);
 
   Serial.println(cvCompleted ? "CV completed" : "CV stopped before completion");
+  measurementCompleted = cvCompleted;
+  if (cvCompleted) measurementProgressPermille = 1000;
 }
 
 static void waitUntilUs(uint64_t targetUs) {
@@ -2135,6 +2176,7 @@ void measurementTask(void *pvParameters) {
     measurementEnabled = false;
     measurementStopRequested = true;
     setMeasurementPriority(false);
+    requestTftFullRefresh();
 
     Serial.println("Measurement stopped, task blocked until next RUN");
   }
@@ -2156,12 +2198,46 @@ void drawStaticScreen() {
 
   lcd.setTextSize(1);
   lcd.setCursor(10, 42);
-  lcd.println("LovyanGFX + Shared HW SPI");
+  lcd.println("Potentiostat controller");
   lcd.setCursor(10, 58);
-  lcd.println("Core1: Measurement  Core0: Option/UI");
+  lcd.println("GLCD/Touch disabled during measurement");
 
   // Start/Stop button area
   lcd.drawRect(BTN_X, BTN_Y, BTN_W, BTN_H, TFT_WHITE);
+
+  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  lcd.setTextSize(2);
+  lcd.setCursor(10, 88);
+  lcd.print("Mode: ");
+  lcd.println(measurementModeToText(getMeasurementMode()));
+
+  lcd.setTextSize(1);
+  lcd.setCursor(10, 122);
+  lcd.print("WiFi: ");
+  if (WiFi.status() == WL_CONNECTED) {
+    lcd.print(WiFi.SSID());
+    lcd.print("  ");
+    lcd.println(WiFi.localIP().toString());
+  } else {
+    lcd.println("not connected");
+  }
+
+  lcd.setCursor(10, 140);
+  lcd.print("SD: ");
+  lcd.print(sdMounted ? "OK" : "not mounted");
+  lcd.print("   RTC: ");
+  if (!rtcAvailable) {
+    lcd.println("not found");
+  } else {
+    lcd.println(rtcUtcSynced ? "UTC synced" : "not synced");
+  }
+
+  lcd.setCursor(10, 158);
+  lcd.print("State: ");
+  lcd.println(measurementEnabled ? "MEASURING - GLCD locked" : "IDLE");
+
+  lcd.setCursor(10, 176);
+  lcd.println("Use web app for CV/SWV/DPV setup and files.");
 
   lcd.endWrite();
   deselectAllSPI();
@@ -2243,7 +2319,9 @@ void drawMeasurement(const MeasurementData &data) {
 
 void serviceTftRefresh() {
   // Must be called only from optionTask.
-  if (measurementBusy) return;
+  // GLCD and Touch share the SPI bus with ADC/DAC. During a measurement session
+  // no display transaction is allowed, including quiet/settle windows.
+  if (measurementSessionActive()) return;
 
   bool doFull = tftFullRefreshRequested;
   bool doRun  = tftRunButtonRefreshRequested;
@@ -2319,7 +2397,7 @@ void printMeasurementCsv(const MeasurementData &data) {
 
 bool waitMeasurementIdle(uint32_t timeoutMs) {
   uint32_t startMs = millis();
-  while (measurementBusy) {
+  while (measurementSessionActive()) {
     if (millis() - startMs >= timeoutMs) return false;
     vTaskDelay(pdMS_TO_TICKS(1));
   }
@@ -2351,7 +2429,7 @@ void setLMPRegisterOption(uint8_t reg, uint8_t value) {
 
 #if ENABLE_TFT_DISPLAY
 void manualRefreshDisplay() {
-  if (measurementEnabled || measurementBusy) {
+  if (measurementSessionActive()) {
     Serial.println("TFT refresh skipped: STOP measurement first");
     return;
   }
@@ -2382,14 +2460,11 @@ void handleTouchControl() {
   static bool lastPressed = false;
 
   if (touchCalibrationMode) return;
+  if (measurementSessionActive()) return;
 
   uint32_t nowMs = millis();
   if (nowMs - lastTouchMs < 50) return;   // about 20 Hz
   lastTouchMs = nowMs;
-
-  // Do not read touch during the exact measurement transaction window.
-  // This lets STOP remain responsive between measurement points/sweeps.
-  if (measurementBusy) return;
 
   if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(5)) != pdTRUE) {
     return;
@@ -2608,8 +2683,8 @@ uint16_t xpt2046Read12_locked(uint8_t cmd) {
 
 void printRawTouchOnce() {
 #if ENABLE_TFT_DISPLAY && ENABLE_TOUCH_CONTROL
-  if (measurementBusy) {
-    Serial.println("Raw touch skipped: measurement busy");
+  if (measurementSessionActive()) {
+    Serial.println("Raw touch skipped: measurement active");
     return;
   }
 
@@ -2641,8 +2716,8 @@ void printRawTouchOnce() {
 
 void printTouchOnce() {
 #if ENABLE_TFT_DISPLAY && ENABLE_TOUCH_CONTROL
-  if (measurementBusy) {
-    Serial.println("Touch read skipped: measurement busy");
+  if (measurementSessionActive()) {
+    Serial.println("Touch read skipped: measurement active");
     return;
   }
 
@@ -3597,6 +3672,14 @@ static String measurementStatusJson() {
   json += measurementBusy ? F("true") : F("false");
   json += F(",\"stop_requested\":");
   json += measurementStopRequested ? F("true") : F("false");
+  json += F(",\"completed\":");
+  json += measurementCompleted ? F("true") : F("false");
+  json += F(",\"cycle_current\":");
+  json += String(measurementCycleCurrent);
+  json += F(",\"cycle_total\":");
+  json += String(measurementCycleTotal);
+  json += F(",\"progress_percent\":");
+  json += String((float)measurementProgressPermille * 0.1f, 1);
   json += F(",\"mode\":\"");
   json += measurementModeToText(getMeasurementMode());
   json += F("\",\"modes\":[\"SWEEP\",\"HOLD_CENTER\",\"CV\",\"SWV\",\"DPV\"]");
