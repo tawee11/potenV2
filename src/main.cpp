@@ -223,7 +223,7 @@ public:
       auto cfg = _bus_instance.config();
       cfg.spi_host    = SPI2_HOST;
       cfg.spi_mode    = 0;
-      cfg.freq_write  = 20000000;       // Safer for shared SPI with TFT + Touch + DAC/ADC
+      cfg.freq_write  = 10000000;       // Safer for shared SPI with TFT + Touch + DAC/ADC
       cfg.freq_read   = 8000000;
       cfg.spi_3wire   = false;
       cfg.use_lock    = true;
@@ -252,7 +252,7 @@ public:
       cfg.offset_rotation  = 0;
       cfg.dummy_read_pixel = 8;
       cfg.dummy_read_bits  = 1;
-      cfg.readable         = true;
+      cfg.readable         = false; // ไม่ต้องอ่านข้อมูลกลับจากจอ
       cfg.invert           = false;
       cfg.rgb_order        = false;
       cfg.dlen_16bit       = false;
@@ -348,6 +348,8 @@ static QueueHandle_t loggerQueue = nullptr;
 static QueueHandle_t sdRecordQueue = nullptr;
 
 static bool initSdCard();
+static bool wifiPortalApActive();
+static String wifiPortalApSsid();
 void vibrationOn(uint8_t duty);
 void vibrationOff();
 
@@ -643,6 +645,8 @@ struct RtcDateTime {
   bool oscillatorStopped;
 };
 
+static bool rtcReadUtc_safe(RtcDateTime &dt);
+
 // Latest measurement for manual TFT refresh.
 static MeasurementData lastMeasurement;
 volatile bool hasLastMeasurement = false;
@@ -651,8 +655,85 @@ volatile bool hasLastMeasurement = false;
 // Only optionTask executes the actual lcd.* drawing.
 // Touch/Serial/Web callbacks should request a refresh instead of drawing directly.
 volatile bool tftFullRefreshRequested = false;
+volatile bool tftStatusRefreshRequested = false;
+volatile bool tftTimeRefreshRequested = false;
 volatile bool tftRunButtonRefreshRequested = false;
 volatile bool tftDrawMeasurementRequested = false;
+
+static String formatBytesMb(uint64_t bytes) {
+  return String((uint32_t)(bytes / (1024ULL * 1024ULL))) + " MB";
+}
+
+static bool formatRtcUtcDateTime(String &out) {
+  RtcDateTime rtc;
+  if (!rtcReadUtc_safe(rtc) || rtc.oscillatorStopped) return false;
+
+  char buf[24];
+  snprintf(
+    buf,
+    sizeof(buf),
+    "%04u-%02u-%02u %02u:%02u",
+    rtc.year,
+    rtc.month,
+    rtc.day,
+    rtc.hour,
+    rtc.minute
+  );
+  out = buf;
+  return true;
+}
+
+struct TftStatusText {
+  String wifiLine1;
+  String wifiLine2;
+  String wifiLine3;
+  String sdLine;
+  String rtcLine;
+  String rtcTimeLine;
+  String stateLine;
+};
+
+static String buildRtcTimeLineText() {
+  String rtcText;
+  if (!formatRtcUtcDateTime(rtcText)) rtcText = "--";
+  return String("RTC UTC: ") + rtcText;
+}
+
+static TftStatusText buildTftStatusText() {
+  TftStatusText text;
+
+  if (WiFi.status() == WL_CONNECTED) {
+    text.wifiLine1 = String("WiFi STA: ") + WiFi.SSID();
+    text.wifiLine2 = String("Access: http://") + WiFi.localIP().toString();
+    text.wifiLine3 = "";
+  } else if (wifiPortalApActive()) {
+    text.wifiLine1 = "WiFi STA: not connected";
+    text.wifiLine2 = String("Setup AP: ") + wifiPortalApSsid();
+    text.wifiLine3 = "Access: http://192.168.4.1";
+  } else {
+    text.wifiLine1 = "WiFi STA: not connected";
+    text.wifiLine2 = "";
+    text.wifiLine3 = "";
+  }
+
+  if (sdMounted) {
+    uint64_t totalBytes = SD_MMC.totalBytes();
+    uint64_t usedBytes = SD_MMC.usedBytes();
+    uint64_t freeBytes = (totalBytes > usedBytes) ? (totalBytes - usedBytes) : 0;
+    text.sdLine = String("SD: free ") + formatBytesMb(freeBytes) + " / " + formatBytesMb(totalBytes);
+  } else {
+    text.sdLine = "SD: not mounted";
+  }
+
+  if (!rtcAvailable) {
+    text.rtcLine = "RTC: not found";
+  } else {
+    text.rtcLine = String("RTC: ") + (rtcUtcSynced ? "UTC synced" : "not synced");
+  }
+  text.rtcTimeLine = buildRtcTimeLineText();
+  text.stateLine = String("State: ") + (measurementEnabled ? "MEASURING - GLCD locked" : "IDLE");
+  return text;
+}
 
 static bool measurementSessionActive() {
   return measurementEnabled || measurementBusy;
@@ -676,10 +757,17 @@ static void setMeasurementProgress(uint32_t doneSteps, uint32_t totalSteps) {
 
 void requestTftFullRefresh() {
   tftFullRefreshRequested = true;
+  tftStatusRefreshRequested = true;
   tftRunButtonRefreshRequested = true;
-  if (hasLastMeasurement) {
-    tftDrawMeasurementRequested = true;
-  }
+  tftDrawMeasurementRequested = false;
+}
+
+void requestTftStatusRefresh() {
+  tftStatusRefreshRequested = true;
+}
+
+void requestTftTimeRefresh() {
+  tftTimeRefreshRequested = true;
 }
 
 void requestTftRunButtonRefresh() {
@@ -1023,6 +1111,7 @@ static bool syncUtcTimeFromNtpToRtc(uint32_t timeoutMs) {
       bool ok = rtcSetUtcFromTm_safe(utc);
       Serial.print("RTC UTC sync from NTP ");
       Serial.println(ok ? "OK" : "FAILED");
+      requestTftStatusRefresh();
       return ok;
     }
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -2183,12 +2272,77 @@ void measurementTask(void *pvParameters) {
 }
 
 #if ENABLE_TFT_DISPLAY
+void printRtcTimeLine(const String &line) {
+  lcd.fillRect(10, 212, 260, 12, TFT_BLACK);
+  lcd.setCursor(10, 212);
+  lcd.println(line);
+}
+
+void drawRtcTimeLine() {
+  // Must be called while holding spiMutex.
+  String timeLine = buildRtcTimeLineText();
+
+  deselectAllSPI();
+
+  lcd.setRotation(1);
+  lcd.startWrite();
+  lcd.setTextDatum(TL_DATUM);
+  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  lcd.setTextSize(1);
+  printRtcTimeLine(timeLine);
+
+  lcd.endWrite();
+  deselectAllSPI();
+}
+
+void drawStatusPanel() {
+  // Must be called while holding spiMutex.
+  TftStatusText text = buildTftStatusText();
+
+  deselectAllSPI();
+
+  lcd.setRotation(1);
+  lcd.startWrite();
+  lcd.setTextDatum(TL_DATUM);
+  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+
+  lcd.setTextSize(1);
+  lcd.fillRect(10, 122, 460, 145, TFT_BLACK);
+  lcd.setCursor(10, 122);
+  lcd.println(text.wifiLine1);
+  if (text.wifiLine2.length() > 0) {
+    lcd.setCursor(10, 140);
+    lcd.println(text.wifiLine2);
+  }
+  if (text.wifiLine3.length() > 0) {
+    lcd.setCursor(10, 158);
+    lcd.println(text.wifiLine3);
+  }
+
+  lcd.setCursor(10, 176);
+  lcd.println(text.sdLine);
+
+  lcd.setCursor(10, 194);
+  lcd.println(text.rtcLine);
+
+  printRtcTimeLine(text.rtcTimeLine);
+
+  lcd.setCursor(10, 230);
+  lcd.println(text.stateLine);
+
+  lcd.setCursor(10, 248);
+  lcd.println("Use web app for CV/SWV/DPV setup and files.");
+
+  lcd.endWrite();
+  deselectAllSPI();
+}
+
 void drawStaticScreen() {
   // Must be called while holding spiMutex.
   deselectAllSPI();
 
-  lcd.startWrite();
   lcd.setRotation(1);                 // Set rotation before clearing/drawing.
+  lcd.startWrite();
   lcd.fillScreen(TFT_BLACK);
   lcd.setTextDatum(TL_DATUM);
   lcd.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -2211,35 +2365,8 @@ void drawStaticScreen() {
   lcd.print("Mode: ");
   lcd.println(measurementModeToText(getMeasurementMode()));
 
-  lcd.setTextSize(1);
-  lcd.setCursor(10, 122);
-  lcd.print("WiFi: ");
-  if (WiFi.status() == WL_CONNECTED) {
-    lcd.print(WiFi.SSID());
-    lcd.print("  ");
-    lcd.println(WiFi.localIP().toString());
-  } else {
-    lcd.println("not connected");
-  }
-
-  lcd.setCursor(10, 140);
-  lcd.print("SD: ");
-  lcd.print(sdMounted ? "OK" : "not mounted");
-  lcd.print("   RTC: ");
-  if (!rtcAvailable) {
-    lcd.println("not found");
-  } else {
-    lcd.println(rtcUtcSynced ? "UTC synced" : "not synced");
-  }
-
-  lcd.setCursor(10, 158);
-  lcd.print("State: ");
-  lcd.println(measurementEnabled ? "MEASURING - GLCD locked" : "IDLE");
-
-  lcd.setCursor(10, 176);
-  lcd.println("Use web app for CV/SWV/DPV setup and files.");
-
   lcd.endWrite();
+  drawStatusPanel();
   deselectAllSPI();
 }
 
@@ -2247,6 +2374,7 @@ void drawRunButton(bool running) {
   // Must be called while holding spiMutex.
   deselectAllSPI();
 
+  lcd.setRotation(1);
   lcd.startWrite();
   uint16_t bg = running ? TFT_RED : TFT_GREEN;
   lcd.fillRect(BTN_X + 2, BTN_Y + 2, BTN_W - 4, BTN_H - 4, bg);
@@ -2264,6 +2392,7 @@ void drawMeasurement(const MeasurementData &data) {
   // Must be called while holding spiMutex.
   deselectAllSPI();
 
+  lcd.setRotation(1);
   lcd.startWrite();
   lcd.setTextDatum(TL_DATUM);
   lcd.setTextColor(TFT_CYAN, TFT_BLACK);
@@ -2324,10 +2453,12 @@ void serviceTftRefresh() {
   if (measurementSessionActive()) return;
 
   bool doFull = tftFullRefreshRequested;
+  bool doStatus = tftStatusRefreshRequested;
+  bool doTime = tftTimeRefreshRequested;
   bool doRun  = tftRunButtonRefreshRequested;
   bool doMeas = tftDrawMeasurementRequested && hasLastMeasurement;
 
-  if (!doFull && !doRun && !doMeas) return;
+  if (!doFull && !doStatus && !doTime && !doRun && !doMeas) return;
 
   if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
     return;
@@ -2335,6 +2466,8 @@ void serviceTftRefresh() {
 
   // Clear requests after we get the mutex, so a missed draw can be requested again.
   tftFullRefreshRequested = false;
+  tftStatusRefreshRequested = false;
+  tftTimeRefreshRequested = false;
   tftRunButtonRefreshRequested = false;
   tftDrawMeasurementRequested = false;
 
@@ -2342,6 +2475,10 @@ void serviceTftRefresh() {
 
   if (doFull) {
     drawStaticScreen();
+  } else if (doStatus) {
+    drawStatusPanel();
+  } else if (doTime) {
+    drawRtcTimeLine();
   }
 
   if (doRun || doFull) {
@@ -2915,6 +3052,7 @@ static const char *WIFI_NVS_KEY         = "wifi_list_v1";          // WiFi crede
 static const char *WIFI_PORTAL_FILE     = "/wifi_index.html";      // put this file in PlatformIO data/ and upload LittleFS
 static const char *WIFI_AP_PASSWORD     = "12345678";
 static const uint8_t WIFI_MAX_CREDS     = 12;
+static const uint8_t WIFI_DEFAULT_ATTEMPTS = 3;
 static const uint32_t WIFI_DEFAULT_TIMEOUT_MS = 6000;
 static const uint32_t WIFI_STORED_TIMEOUT_MS  = 4500;
 static const uint32_t WIFI_RETRY_PERIOD_MS    = 30000;
@@ -2940,6 +3078,14 @@ static bool wifiApMode = false;
 static bool wifiConnectRequested = false;
 static uint32_t wifiLastRetryMs = 0;
 static String wifiApSsid = "smart-ec-Setup";
+
+static bool wifiPortalApActive() {
+  return wifiApMode;
+}
+
+static String wifiPortalApSsid() {
+  return wifiApSsid;
+}
 
 static String urlDecode(const String &src) {
   String out;
@@ -3229,8 +3375,17 @@ static bool connectDefaultWifiFirst() {
   c.user = String(DEFAULT_WIFI_USER);
   c.enterprise = c.user.length() > 0;
   if (c.ssid.length() == 0) return false;
-  Serial.println("Trying default WiFi first...");
-  return connectWifiCredential(c, WIFI_DEFAULT_TIMEOUT_MS);
+  Serial.print("Trying default WiFi first, attempts=");
+  Serial.println(WIFI_DEFAULT_ATTEMPTS);
+  for (uint8_t attempt = 1; attempt <= WIFI_DEFAULT_ATTEMPTS; attempt++) {
+    Serial.print("Default WiFi attempt ");
+    Serial.print(attempt);
+    Serial.print("/");
+    Serial.println(WIFI_DEFAULT_ATTEMPTS);
+    if (connectWifiCredential(c, WIFI_DEFAULT_TIMEOUT_MS)) return true;
+    vTaskDelay(pdMS_TO_TICKS(250));
+  }
+  return false;
 }
 
 static bool connectStoredWifiFast() {
@@ -4300,6 +4455,54 @@ static void stopWifiPortalIfConnected() {
   Serial.println("WiFi AP portal stopped after STA connected.");
 }
 
+static void requestTftRefreshOnStatusChange() {
+#if ENABLE_TFT_DISPLAY
+  static int lastWifiStatus = -1;
+  static String lastWifiSsid;
+  static String lastWifiIp;
+  static bool lastApMode = false;
+  static String lastApSsid;
+  static bool lastSdMounted = false;
+  static bool lastRtcAvailable = false;
+  static bool lastRtcUtcSynced = false;
+
+  int wifiStatus = WiFi.status();
+  String wifiSsid = (wifiStatus == WL_CONNECTED) ? WiFi.SSID() : String("");
+  String wifiIp = (wifiStatus == WL_CONNECTED) ? WiFi.localIP().toString() : String("");
+
+  if (wifiStatus != lastWifiStatus ||
+      wifiSsid != lastWifiSsid ||
+      wifiIp != lastWifiIp ||
+      wifiApMode != lastApMode ||
+      wifiApSsid != lastApSsid ||
+      sdMounted != lastSdMounted ||
+      rtcAvailable != lastRtcAvailable ||
+      rtcUtcSynced != lastRtcUtcSynced) {
+    lastWifiStatus = wifiStatus;
+    lastWifiSsid = wifiSsid;
+    lastWifiIp = wifiIp;
+    lastApMode = wifiApMode;
+    lastApSsid = wifiApSsid;
+    lastSdMounted = sdMounted;
+    lastRtcAvailable = rtcAvailable;
+    lastRtcUtcSynced = rtcUtcSynced;
+    requestTftStatusRefresh();
+  }
+#endif
+}
+
+static void requestTftPeriodicIdleRefresh() {
+#if ENABLE_TFT_DISPLAY
+  static uint32_t lastRefreshMs = 0;
+  if (measurementSessionActive()) return;
+
+  uint32_t nowMs = millis();
+  if (nowMs - lastRefreshMs < 60000UL) return;
+  lastRefreshMs = nowMs;
+  requestTftTimeRefresh();
+#endif
+}
+
 static void wifiManagerBeginFromOptionTask() {
   Serial.println("WiFi manager: default first, then fast-scan NVS credentials, then AP portal.");
   if (connectDefaultWifiFirst()) {
@@ -4323,6 +4526,7 @@ static void wifiManagerLoop() {
     startWifiWebServer();
     stopWifiPortalIfConnected();
     maybeSyncUtcAfterWifiConnected();
+    requestTftRefreshOnStatusChange();
     return;
   }
 
@@ -4334,6 +4538,7 @@ static void wifiManagerLoop() {
       startWifiPortal();
     }
   }
+  requestTftRefreshOnStatusChange();
 }
 
 static bool initSdCard() {
@@ -4344,12 +4549,14 @@ static bool initSdCard() {
   if (!SD_MMC.begin("/sdcard", false)) {
     sdMounted = false;
     Serial.println("SD_MMC 4-bit mount failed. CV .bin logging disabled.");
+    requestTftFullRefresh();
     return false;
   }
 
   sdMounted = true;
   Serial.print("SD_MMC 4-bit mounted OK, size MB=");
   Serial.println((uint32_t)(SD_MMC.cardSize() / (1024ULL * 1024ULL)));
+  requestTftFullRefresh();
   return true;
 #else
   return false;
@@ -4500,6 +4707,7 @@ void optionTask(void *pvParameters) {
 #endif
 
 #if ENABLE_TFT_DISPLAY
+    requestTftPeriodicIdleRefresh();
     serviceTftRefresh();
 #endif
 
@@ -4632,6 +4840,10 @@ void setup() {
 
   spiBus.begin(SPI_SCK, SPI_MISO, SPI_MOSI, -1);
   deselectAllSPI();
+
+#if ENABLE_SD_LOGGING
+  initSdCard();
+#endif
 
 #if ENABLE_TFT_DISPLAY
   Serial.println("Init LovyanGFX TFT...");
