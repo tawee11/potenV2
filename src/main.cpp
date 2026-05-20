@@ -122,12 +122,14 @@ static const uint32_t DAC_SETTLE_US       = 5000;    // analog settle after DAC 
 static const uint32_t ADC_CONVERSION_US   = 6;       // AD7694 conversion wait
 static const uint32_t ADC_BETWEEN_AVG_US  = 100;     // gap between averaged ADC reads
 static const uint8_t  ADC_AVG_SAMPLES     = 4;
+static const uint32_t PULSE_TAIL_AVG_US   = 20000;   // SWV/DPV: average the stable tail of each pulse
+static const uint32_t PULSE_TAIL_AVG_MIN_US = 1000;  // For very short pulses, use all remaining hold time
 static const uint32_t SWEEP_INTERVAL_MS   = 3000;
 static const uint32_t HOLD_CENTER_INTERVAL_MS = 250;
 static const uint8_t  SD_WRITE_BATCH_LIMIT = 32;
 static const uint32_t SD_FLUSH_INTERVAL_MS = 5000;
 static const uint16_t CV_SERIAL_LOG_EVERY = 200;
-static const float POTENTIAL_ZERO_V = ADC_VREF * 0.5f; // electrode 0V maps to DAC 2.048V
+static const float POTENTIAL_ZERO_V = ADC_VREF * 0.5f; // E=0V maps to DAC/RE 2.048V
 static const float CV_MIN_POTENTIAL_V = -POTENTIAL_ZERO_V;
 static const float CV_MAX_POTENTIAL_V = DAC_VREF - POTENTIAL_ZERO_V;
 
@@ -826,11 +828,11 @@ static float clampFloat(float value, float minValue, float maxValue) {
 }
 
 static float potentialToDacVoltage(float potentialV) {
-  return clampFloat(POTENTIAL_ZERO_V + potentialV, 0.0f, DAC_VREF);
+  return clampFloat(POTENTIAL_ZERO_V - potentialV, 0.0f, DAC_VREF);
 }
 
 static float dacVoltageToPotential(float dacVoltage) {
-  return dacVoltage - POTENTIAL_ZERO_V;
+  return POTENTIAL_ZERO_V - dacVoltage;
 }
 
 static uint8_t decToBcd(uint8_t value) {
@@ -1814,16 +1816,58 @@ static void waitUntilUs(uint64_t targetUs) {
   }
 }
 
+static uint32_t pulseTailAverageWindowUs(uint32_t holdUs) {
+  if (holdUs <= PULSE_TAIL_AVG_MIN_US) return holdUs;
+
+  uint32_t tailUs = PULSE_TAIL_AVG_US;
+  if (tailUs > holdUs) tailUs = holdUs;
+
+  // Keep the first part of the pulse as settle time when the pulse is long enough.
+  if (holdUs > (PULSE_TAIL_AVG_MIN_US * 2UL) && tailUs > (holdUs / 2UL)) {
+    tailUs = holdUs / 2UL;
+  }
+
+  if (tailUs < PULSE_TAIL_AVG_MIN_US) tailUs = PULSE_TAIL_AVG_MIN_US;
+  return tailUs;
+}
+
+static uint16_t readAD7694TailAverageUntilUs(uint64_t endUs) {
+  uint64_t sum = 0;
+  uint32_t count = 0;
+
+  while (measurementEnabled && !measurementStopRequested) {
+    uint64_t nowUs = esp_timer_get_time();
+    if (nowUs >= endUs) break;
+
+    sum += readAD7694Average_safe(ADC_AVG_SAMPLES);
+    count++;
+
+    if ((count & 0x0F) == 0) {
+      taskYIELD();
+    }
+  }
+
+  if (count == 0) {
+    return readAD7694Average_safe(ADC_AVG_SAMPLES);
+  }
+
+  return (uint16_t)((sum + (count / 2UL)) / count);
+}
+
 static char readCurrentAtPotential(float potentialV, uint32_t holdUs, uint16_t &adcRaw, float &adcVoltage, float &currentAmp, float &rtiaOhm, uint8_t &tiaCN) {
   float dacV = potentialToDacVoltage(potentialV);
   writeAD5680_safe(voltageToDACCode(dacV));
-  waitUntilUs(esp_timer_get_time() + holdUs);
 
-  adcRaw = readAD7694Average_safe(ADC_AVG_SAMPLES);
+  uint64_t endUs = esp_timer_get_time() + holdUs;
+  uint32_t tailUs = pulseTailAverageWindowUs(holdUs);
+  waitUntilUs(endUs - tailUs);
+
+  adcRaw = readAD7694TailAverageUntilUs(endUs);
   adcVoltage = adcRawToVoltage(adcRaw);
 
   char action = autoRangeUpdateAndMaybeChange(adcVoltage);
   if (action != '-') {
+    delayMicroseconds(AUTO_RANGE_SETTLE_US);
     adcRaw = readAD7694Average_safe(ADC_AVG_SAMPLES);
     adcVoltage = adcRawToVoltage(adcRaw);
   }
