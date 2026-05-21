@@ -354,6 +354,7 @@ static bool wifiPortalApActive();
 static String wifiPortalApSsid();
 void vibrationOn(uint8_t duty);
 void vibrationOff();
+void vibrationPulse(uint8_t duty, uint32_t durationMs);
 
 // ======================================================
 // Runtime state
@@ -3120,6 +3121,7 @@ static DNSServer wifiDns;
 static bool wifiServerStarted = false;
 static bool wifiApMode = false;
 static bool wifiConnectRequested = false;
+static bool vibrationTestActive = false;
 static uint32_t wifiLastRetryMs = 0;
 static String wifiApSsid = "smart-ec-Setup";
 
@@ -3594,7 +3596,13 @@ static String wifiStatusJson() {
   json += jsonEscape(WiFi.status() == WL_CONNECTED ? WiFi.SSID() : String(""));
   json += F("\",\"ip\":\"");
   json += jsonEscape(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String(""));
-  json += F("\",\"ap_active\":");
+  json += F("\",\"rssi\":");
+  if (WiFi.status() == WL_CONNECTED) {
+    json += String(WiFi.RSSI());
+  } else {
+    json += F("null");
+  }
+  json += F(",\"ap_active\":");
   json += wifiApMode ? F("true") : F("false");
   json += F(",\"ap_ssid\":\"");
   json += jsonEscape(wifiApSsid);
@@ -4183,6 +4191,30 @@ static void handleMeasurementStopApi() {
   wifiServer.send(200, "application/json", measurementStatusJson());
 }
 
+static void handleVibrationTestApi() {
+  if (measurementEnabled || measurementBusy || cvLogActive || sdLogFileOpen) {
+    wifiServer.send(409, "application/json", F("{\"ok\":false,\"message\":\"Stop measurement before testing vibration\"}"));
+    return;
+  }
+
+  if (vibrationTestActive) {
+    wifiServer.send(409, "application/json", F("{\"ok\":false,\"message\":\"Vibration test is already running\"}"));
+    return;
+  }
+
+  uint8_t powerPercent = (uint8_t)webArgUInt("motor_power_percent", 60);
+  uint32_t durationMs = webArgUInt("duration_ms", 1000);
+  if (powerPercent > 100) powerPercent = 100;
+  if (durationMs < 100UL) durationMs = 100UL;
+  if (durationMs > 3000UL) durationMs = 3000UL;
+
+  vibrationTestActive = true;
+  vibrationPulse(motorPercentToDuty(powerPercent), durationMs);
+  vibrationTestActive = false;
+
+  wifiServer.send(200, "application/json", F("{\"ok\":true,\"message\":\"Vibration test completed\"}"));
+}
+
 static bool isSafeCvFilePath(const String &path) {
   return (path.startsWith("/cv_") || path.startsWith("/swv_") || path.startsWith("/dpv_")) && path.endsWith(".bin") && path.indexOf("..") < 0;
 }
@@ -4208,6 +4240,8 @@ static String cvFilesJson() {
           json += jsonEscape(name);
           json += F("\",\"size\":");
           json += String((uint32_t)file.size());
+          json += F(",\"modified\":");
+          json += String((uint32_t)file.getLastWrite());
           json += F("}");
         }
         file = root.openNextFile();
@@ -4412,6 +4446,7 @@ static void startWifiWebServer() {
   wifiServer.on("/api/measurement/dpv", HTTP_POST, []() { handleDpvConfigApi(); });
   wifiServer.on("/api/measurement/start", HTTP_POST, []() { handleMeasurementStartApi(); });
   wifiServer.on("/api/measurement/stop", HTTP_POST, []() { handleMeasurementStopApi(); });
+  wifiServer.on("/api/measurement/vibration-test", HTTP_POST, []() { handleVibrationTestApi(); });
   wifiServer.on("/api/cv/files", HTTP_GET, []() { handleCvFilesApi(); });
   wifiServer.on("/api/cv/download", HTTP_GET, []() { handleCvDownloadCsvApi(); });
   wifiServer.on("/api/cv/download-bin", HTTP_GET, []() { handleCvDownloadBinApi(); });
@@ -4784,7 +4819,7 @@ void vibrationOff() {
 void vibrationPulse(uint8_t duty, uint32_t durationMs) {
   // Start kick
   ledcWrite(VIB_MOTOR_PIN, 255);
-  vTaskDelay(pdMS_TO_TICKS(100));
+  vTaskDelay(pdMS_TO_TICKS(10));
 
   // Run
   ledcWrite(VIB_MOTOR_PIN, duty);

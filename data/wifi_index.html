@@ -6,7 +6,7 @@
   <title>smart-ec Control</title>
   <style>
     :root{--bg:#f4f8fb;--panel:#fff;--ink:#142033;--muted:#66758c;--line:#d9e5f4;--primary:#0f766e;--accent:#38bdf8;--ok:#138a4d;--warn:#b45309;--danger:#dc2626;--soft:#f7fbff;--shadow:0 14px 40px rgba(22,45,82,.12);--radius:16px}
-    *{box-sizing:border-box}body{margin:0;min-height:100vh;font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--ink);background:var(--bg)}.wrap{width:min(1040px,100%);margin:auto;padding:14px}.hero,.grid{display:grid;gap:14px;grid-template-columns:1.2fr .8fr}.card,.brand,.status-card{background:var(--panel);border:1px solid var(--line);box-shadow:var(--shadow);border-radius:var(--radius);padding:18px}.brand,.status-card{padding:12px 14px}.brand h1{margin:4px 0;font-size:28px}.brand p,.small{color:var(--muted);line-height:1.45}.brand p{margin:0;font-size:14px}.chip{display:inline-flex;padding:4px 9px;border-radius:999px;background:#dffaf3;color:#075e54;font-size:12px;font-weight:800}.status-row{display:flex;gap:10px;align-items:center}.dot{width:10px;height:10px;border-radius:50%;background:var(--warn)}.dot.ok{background:var(--ok)}.dot.run{background:#2563eb}.dot.done{background:var(--ok)}.dot.err{background:var(--danger)}.status-title{font-weight:850}.status-sub{font-size:13px;color:var(--muted);margin-top:3px;word-break:break-word}.measure-state{display:grid;gap:10px;margin:12px 0;padding:12px;border:1px solid var(--line);border-radius:14px;background:var(--soft)}.measure-head{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.measure-pill{display:inline-flex;align-items:center;gap:8px;font-weight:900}.bar{height:12px;border-radius:999px;background:#dbe7f5;overflow:hidden}.bar-fill{height:100%;width:0%;background:#0f766e;transition:width .2s}.measure-grid{display:grid;gap:8px;grid-template-columns:repeat(4,1fr)}.measure-box{border:1px solid var(--line);border-radius:12px;background:#fff;padding:9px}.measure-box b{display:block;font-size:13px;color:#334155}.measure-box span{font-size:14px;color:var(--muted)}.field{margin:10px 0}.label{display:block;font-size:13px;font-weight:800;color:#334155;margin-bottom:6px}input,select{width:100%;border:1px solid var(--line);border-radius:12px;padding:11px 12px;font-size:15px;background:#fff;outline:none}input:focus,select:focus{border-color:#0d9488;box-shadow:0 0 0 3px rgba(20,184,166,.14)}.check{display:flex;gap:10px;align-items:center;padding:11px 12px;border:1px solid var(--line);border-radius:12px;background:var(--soft)}.check input{width:auto}.actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:12px}button{border:0;border-radius:12px;padding:11px 13px;font-weight:850;font-size:14px;cursor:pointer;background:#e7f0fb;color:#1f365c}button.primary{background:linear-gradient(135deg,var(--primary),var(--accent));color:#fff}button.danger{background:#fee2e2;color:var(--danger)}button.ghost{background:#f3f7fb;color:#334155}button.active,.tab.active{background:#0f766e;color:#fff}.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.tab{min-width:112px;background:#e7f0fb;color:#1f365c}.tab-panel{display:block}.list{display:grid;gap:10px}.item,.scan{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;border:1px solid var(--line);border-radius:14px;padding:12px;background:#fff}.ssid{font-weight:900}.meta,.rssi{color:var(--muted);font-size:13px}.scan-list{max-height:340px;overflow:auto;display:grid;gap:9px}.hide{display:none!important}.toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);max-width:min(92vw,520px);background:#111827;color:#fff;padding:13px 16px;border-radius:14px;box-shadow:var(--shadow);opacity:0;pointer-events:none;transition:.2s}.toast.show{opacity:1}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--ink);background:var(--bg)}.wrap{width:min(1040px,100%);margin:auto;padding:14px}.hero,.grid{display:grid;gap:14px;grid-template-columns:1.2fr .8fr}.card,.brand,.status-card{background:var(--panel);border:1px solid var(--line);box-shadow:var(--shadow);border-radius:var(--radius);padding:18px}.brand,.status-card{padding:12px 14px}.brand h1{margin:4px 0;font-size:28px}.brand p,.small{color:var(--muted);line-height:1.45}.brand p{margin:0;font-size:14px}.chip{display:inline-flex;padding:4px 9px;border-radius:999px;background:#dffaf3;color:#075e54;font-size:12px;font-weight:800}.status-row{display:flex;gap:10px;align-items:center}.dot{width:10px;height:10px;border-radius:50%;background:var(--warn)}.dot.ok{background:var(--ok)}.dot.run{background:#2563eb}.dot.done{background:var(--ok)}.dot.err{background:var(--danger)}.status-title{font-weight:850}.status-sub{font-size:13px;color:var(--muted);margin-top:3px;word-break:break-word}.signal-row{display:flex;gap:8px;align-items:flex-end;margin:8px 0 2px}.signal-bars{display:inline-flex;gap:3px;align-items:flex-end;height:18px}.signal-bars span{width:6px;border-radius:3px;background:#cbd5e1}.signal-bars span:nth-child(1){height:6px}.signal-bars span:nth-child(2){height:10px}.signal-bars span:nth-child(3){height:14px}.signal-bars span:nth-child(4){height:18px}.signal-bars.level-1 span:nth-child(-n+1),.signal-bars.level-2 span:nth-child(-n+2),.signal-bars.level-3 span:nth-child(-n+3),.signal-bars.level-4 span:nth-child(-n+4){background:var(--primary)}.measure-state{display:grid;gap:10px;margin:12px 0;padding:12px;border:1px solid var(--line);border-radius:14px;background:var(--soft)}.measure-head{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.measure-pill{display:inline-flex;align-items:center;gap:8px;font-weight:900}.bar{height:12px;border-radius:999px;background:#dbe7f5;overflow:hidden}.bar-fill{height:100%;width:0%;background:#0f766e;transition:width .2s}.measure-grid{display:grid;gap:8px;grid-template-columns:repeat(4,1fr)}.measure-box{border:1px solid var(--line);border-radius:12px;background:#fff;padding:9px}.measure-box b{display:block;font-size:13px;color:#334155}.measure-box span{font-size:14px;color:var(--muted)}.field{margin:10px 0}.label{display:block;font-size:13px;font-weight:800;color:#334155;margin-bottom:6px}input,select{width:100%;border:1px solid var(--line);border-radius:12px;padding:11px 12px;font-size:15px;background:#fff;outline:none}input:focus,select:focus{border-color:#0d9488;box-shadow:0 0 0 3px rgba(20,184,166,.14)}.check{display:flex;gap:10px;align-items:center;padding:11px 12px;border:1px solid var(--line);border-radius:12px;background:var(--soft)}.check input{width:auto}.actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:12px}button{border:0;border-radius:12px;padding:11px 13px;font-weight:850;font-size:14px;cursor:pointer;background:#e7f0fb;color:#1f365c}button.primary{background:linear-gradient(135deg,var(--primary),var(--accent));color:#fff}button.danger{background:#fee2e2;color:var(--danger)}button.ghost{background:#f3f7fb;color:#334155}button.active,.tab.active{background:#0f766e;color:#fff}.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.tab{min-width:112px;background:#e7f0fb;color:#1f365c}.tab-panel{display:block}.list{display:grid;gap:10px}.item,.scan{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;border:1px solid var(--line);border-radius:14px;padding:12px;background:#fff}.ssid{font-weight:900}.meta,.rssi{color:var(--muted);font-size:13px}.scan-list{max-height:340px;overflow:auto;display:grid;gap:9px}.hide{display:none!important}.toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);max-width:min(92vw,520px);background:#111827;color:#fff;padding:13px 16px;border-radius:14px;box-shadow:var(--shadow);opacity:0;pointer-events:none;transition:.2s}.toast.show{opacity:1}
     @media(max-width:820px){.hero,.grid,.measure-grid{grid-template-columns:1fr}.wrap{padding:12px}.brand h1{font-size:32px}}
   </style>
 </head>
@@ -132,6 +132,7 @@
               <div class="field"><label class="label" for="swvAgitationOnMs">Motor ON ms</label><input id="swvAgitationOnMs" name="agitation_on_ms" type="number" step="100" min="100" max="600000" value="2000"></div>
               <div class="field"><label class="label" for="swvAgitationOffMs">Motor OFF ms</label><input id="swvAgitationOffMs" name="agitation_off_ms" type="number" step="100" min="100" max="600000" value="3000"></div>
               <div class="field"><label class="label" for="swvMotorPower">Motor power %</label><input id="swvMotorPower" name="motor_power_percent" type="number" step="1" min="0" max="100" value="60"></div>
+              <div class="field"><label class="label" for="swvVibrationTest">Motor test</label><button id="swvVibrationTest" class="ghost" type="button" onclick="testVibration('SWV')">Test vibration</button></div>
             </div>
           </div>
         </div>
@@ -162,6 +163,7 @@
               <div class="field"><label class="label" for="dpvAgitationOnMs">Motor ON ms</label><input id="dpvAgitationOnMs" name="agitation_on_ms" type="number" step="100" min="100" max="600000" value="2000"></div>
               <div class="field"><label class="label" for="dpvAgitationOffMs">Motor OFF ms</label><input id="dpvAgitationOffMs" name="agitation_off_ms" type="number" step="100" min="100" max="600000" value="3000"></div>
               <div class="field"><label class="label" for="dpvMotorPower">Motor power %</label><input id="dpvMotorPower" name="motor_power_percent" type="number" step="1" min="0" max="100" value="60"></div>
+              <div class="field"><label class="label" for="dpvVibrationTest">Motor test</label><button id="dpvVibrationTest" class="ghost" type="button" onclick="testVibration('DPV')">Test vibration</button></div>
             </div>
           </div>
         </div>
@@ -188,6 +190,13 @@
         <div style="border:1px solid var(--line);border-radius:14px;padding:14px;background:var(--soft)">
           <h3 style="margin:0 0 8px">Basic Test</h3>
           <p class="small">Sweep and Hold Center use the firmware test modes.</p>
+        </div>
+        <div style="border:1px solid var(--line);border-radius:14px;padding:14px;background:var(--soft)">
+          <h3 style="margin:0 0 8px">BIN to CSV</h3>
+          <p class="small">Convert a downloaded measurement BIN file to CSV in this browser.</p>
+          <div class="field"><label class="label" for="localBinFile">BIN file</label><input id="localBinFile" type="file" accept=".bin,application/octet-stream"></div>
+          <div class="actions"><button class="primary" type="button" onclick="convertLocalBinToCsv()">Convert CSV</button></div>
+          <p id="localBinStatus" class="small"></p>
         </div>
         <div style="border:1px solid var(--line);border-radius:14px;padding:14px;background:var(--soft)">
           <h3 style="margin:0 0 8px">OTA Update</h3>
@@ -237,9 +246,20 @@
 const $ = (id) => document.getElementById(id);
 let measurementStateKnown=false;
 let measurementWasActive=false;
+let currentMeasurementActive=false;
 let activeMeasurementMode='CV';
 function toast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2200); }
-async function getJson(url, opts={}){ const r=await fetch(url, opts); if(!r.ok) throw new Error(await r.text()); return await r.json(); }
+async function getJson(url, opts={}){
+  const r=await fetch(url, opts);
+  const text=await r.text();
+  if(!r.ok) throw new Error(text);
+  try{
+    return JSON.parse(text);
+  }catch(e){
+    if(text.trim().startsWith('<')) throw new Error('Firmware endpoint not found. Upload the firmware and LittleFS data again.');
+    throw e;
+  }
+}
 function showTab(name){
   ['measure','files','wifi','maintenance','help'].forEach((key)=>{
     $('panel'+key.charAt(0).toUpperCase()+key.slice(1)).classList.toggle('hide', key!==name);
@@ -289,8 +309,30 @@ function toggleDpvAgitation(){
   $('dpvAgitationBox').classList.toggle('hide', !enabled);
 }
 async function loadStatus(){
-  try{ const s=await getJson('/api/status'); $('dot').classList.toggle('ok', s.connected); $('statusTitle').textContent=s.connected?'Connected':'Setup Portal Active'; $('statusSub').textContent=s.connected?`${s.sta_ssid} - ${s.ip}`:'Not connected to WiFi yet'; $('apInfo').innerHTML=s.ap_active?`AP: <b>${s.ap_ssid}</b><br>Password: <b>${s.ap_password}</b><br>Open: <b>192.168.4.1</b>`:`Saved networks: ${s.saved_count}`; }
+  try{
+    const s=await getJson('/api/status');
+    const rssi=Number(s.rssi);
+    const hasRssi=s.connected && Number.isFinite(rssi);
+    const signal=hasRssi ? wifiSignalText(rssi) : '';
+    const signalLine=hasRssi ? `<span class="signal-row"><span class="signal-bars level-${wifiSignalLevel(rssi)}"><span></span><span></span><span></span><span></span></span><span>Signal: <b>${signal}</b> (${rssi} dBm)</span></span>` : '';
+    $('dot').classList.toggle('ok', s.connected);
+    $('statusTitle').textContent=s.connected?'Connected':'Setup Portal Active';
+    $('statusSub').textContent=s.connected?`${s.sta_ssid} - ${s.ip}`:'Not connected to WiFi yet';
+    $('apInfo').innerHTML=signalLine+(s.ap_active?`AP: <b>${escapeHtml(s.ap_ssid)}</b><br>Password: <b>${escapeHtml(s.ap_password)}</b><br>Open: <b>192.168.4.1</b>`:`Saved networks: ${s.saved_count}`);
+  }
   catch(e){ $('statusTitle').textContent='Status error'; $('statusSub').textContent=e.message; }
+}
+function wifiSignalText(rssi){
+  if(rssi>=-55) return 'Excellent';
+  if(rssi>=-67) return 'Good';
+  if(rssi>=-75) return 'Fair';
+  return 'Weak';
+}
+function wifiSignalLevel(rssi){
+  if(rssi>=-55) return 4;
+  if(rssi>=-67) return 3;
+  if(rssi>=-75) return 2;
+  return 1;
 }
 async function loadNetworks(){
   const box=$('networks');
@@ -336,6 +378,8 @@ async function loadMeasurement(){
   try{
     const m=await getJson('/api/measurement/status');
     const measurementActive=!!(m.running || m.busy || m.cv_log_active || m.sd_log_file_open);
+    currentMeasurementActive=measurementActive;
+    ['swvVibrationTest','dpvVibrationTest'].forEach(id=>{ if($(id)) $(id).disabled=measurementActive; });
     updateModeForms(m.mode);
     updateMeasureStatePanel(m, measurementActive);
     $('measurementStatus').textContent=`${m.running?'Running':'Stopped'} - mode ${m.mode}${m.busy?' - sampling':''} - SD ${m.sd_mounted?'OK':'not mounted'} - RTC ${m.rtc_utc_synced?'UTC synced':'not synced'} - ${m.cv_file||''}`;
@@ -363,15 +407,53 @@ async function loadMeasurement(){
 async function setMode(mode){ updateModeForms(mode); await getJson('/api/measurement/mode',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'mode='+encodeURIComponent(mode)}); toast('Mode set to '+mode); loadMeasurement(); }
 async function startMeasurement(){ await getJson('/api/measurement/start',{method:'POST'}); toast('Measurement started'); loadMeasurement(); }
 async function stopMeasurement(){ await getJson('/api/measurement/stop',{method:'POST'}); toast('Measurement stopped'); loadMeasurement(); }
+async function testVibration(mode){
+  if(currentMeasurementActive){
+    toast('Stop measurement before testing vibration');
+    return;
+  }
+  const powerId=mode==='DPV'?'dpvMotorPower':'swvMotorPower';
+  const btnId=mode==='DPV'?'dpvVibrationTest':'swvVibrationTest';
+  const btn=$(btnId);
+  const body=new URLSearchParams();
+  body.set('mode',mode);
+  body.set('motor_power_percent',$(powerId).value||'60');
+  body.set('duration_ms','1000');
+  try{
+    if(btn) btn.disabled=true;
+    await getJson('/api/measurement/vibration-test',{method:'POST',body});
+    toast('Vibration test completed');
+  }catch(e){
+    toast('Vibration test error: '+e.message);
+  }finally{
+    if(btn) btn.disabled=currentMeasurementActive;
+    loadMeasurement();
+  }
+}
 async function loadCvFiles(){
   const box=$('cvFiles');
   try{
     const data=await getJson('/api/cv/files');
     if(!data.files.length){ box.innerHTML='<p class="small">No measurement files on SD card.</p>'; return; }
-    box.innerHTML=data.files.map(f=>`<div class="item"><div><div class="ssid">${escapeHtml(f.name)}</div><div class="meta">${Number(f.size||0)} bytes</div></div><div class="actions" style="margin-top:0"><button class="danger" type="button" onclick="deleteCvFile('${jsString(f.name)}')">Del</button><a href="/api/cv/download-bin?file=${encodeURIComponent(f.name)}"><button type="button">BIN</button></a><button type="button" onclick="downloadCsvFromBin('${jsString(f.name)}')">CSV</button></div></div>`).join('');
+    const files=(data.files||[]).slice().sort(compareCvFilesNewestFirst);
+    box.innerHTML=files.map(f=>`<div class="item"><div><div class="ssid">${escapeHtml(f.name)}</div><div class="meta">${Number(f.size||0)} bytes</div></div><div class="actions" style="margin-top:0"><button class="danger" type="button" onclick="deleteCvFile('${jsString(f.name)}')">Del</button><a href="/api/cv/download-bin?file=${encodeURIComponent(f.name)}"><button type="button">BIN</button></a><button type="button" onclick="downloadCsvFromBin('${jsString(f.name)}')">CSV</button></div></div>`).join('');
   }catch(e){
     box.innerHTML=`<p class="small">File list error: ${escapeHtml(e.message)}</p>`;
   }
+}
+function cvFileSortKey(name){
+  const base=String(name||'').split('/').pop();
+  const m=base.match(/^(?:cv|swv|dpv)_(\d{8})(?:_(\d{6}))?/i);
+  if(m) return Number(m[1]+(m[2]||'000000'));
+  const fallback=base.match(/^(?:cv|swv|dpv)_(\d+)/i);
+  return fallback ? Number(fallback[1]) : 0;
+}
+function compareCvFilesNewestFirst(a,b){
+  const am=Number(a.modified||0), bm=Number(b.modified||0);
+  if(am!==bm) return bm-am;
+  const ak=cvFileSortKey(a.name), bk=cvFileSortKey(b.name);
+  if(ak!==bk) return bk-ak;
+  return String(b.name||'').localeCompare(String(a.name||''));
 }
 async function deleteCvFile(file){
   if(!confirm('Delete measurement file '+file+'?')) return;
@@ -401,7 +483,7 @@ function downloadBlob(name, type, content){
   a.href=url; a.download=name; document.body.appendChild(a); a.click(); a.remove();
   setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
-function cvBinToCsv(buffer){
+function cvBinToCompactCsv(buffer){
   const view=new DataView(buffer);
   const headerSize=view.getUint16(10,true);
   const recordSize=view.getUint32(12,true);
@@ -454,6 +536,58 @@ function cvBinToCsv(buffer){
   }
   return lines.join('\n');
 }
+function cvBinToDebugCsv(buffer){
+  const view=new DataView(buffer);
+  const headerSize=view.getUint16(10,true);
+  const recordSize=view.getUint32(12,true);
+  const magic=readCString(view,0,8);
+  if((magic!=='POTCVB1' && magic!=='POTSWV1' && magic!=='POTDPV1') || headerSize!==104 || recordSize!==56) throw new Error('Invalid measurement binary format');
+  const header=[
+    ['magic',magic],
+    ['version',view.getUint16(8,true)],
+    ['experiment_name',readCString(view,68,32)],
+    ['started_us',getU64(view,16)],
+    ['zero_dac_v',view.getFloat32(24,true)],
+    ['dac_vref',view.getFloat32(28,true)],
+    ['adc_vref',view.getFloat32(32,true)],
+    ['start_v',view.getFloat32(36,true)],
+    ['vertex1_v',view.getFloat32(40,true)],
+    ['vertex2_v',view.getFloat32(44,true)],
+    ['final_v',view.getFloat32(48,true)],
+    ['step_v',view.getFloat32(52,true)],
+    ['scan_rate_vps',view.getFloat32(56,true)],
+    ['cycles',view.getUint16(60,true)],
+    ['quiet_ms',view.getUint32(64,true)]
+  ];
+  const lines=[];
+  lines.push(header.map(x=>x[0]).join(','));
+  lines.push(header.map(x=>csvEscape(x[1])).join(','));
+  lines.push('');
+  lines.push('sample_index,direction,timestamp_us,period_us,potential_v,dac_set_v,dac_expected_v,dac_code,adc_raw,adc_v,adc_delta_v,current_a,rtia_ohm,tia_cn,auto_range');
+  for(let off=headerSize; off+recordSize<=buffer.byteLength; off+=recordSize){
+    const autoRange=view.getUint8(off+5);
+    const tia=view.getUint8(off+6);
+    const row=[
+      view.getUint32(off,true),
+      view.getInt8(off+4),
+      getU64(view,off+8),
+      view.getUint32(off+16,true),
+      view.getFloat32(off+20,true).toFixed(6),
+      view.getFloat32(off+24,true).toFixed(6),
+      view.getFloat32(off+28,true).toFixed(6),
+      view.getUint32(off+32,true),
+      view.getUint16(off+36,true),
+      view.getFloat32(off+40,true).toFixed(6),
+      view.getFloat32(off+44,true).toFixed(6),
+      view.getFloat32(off+48,true).toExponential(12),
+      view.getFloat32(off+52,true).toFixed(3),
+      '0x'+tia.toString(16).toUpperCase().padStart(2,'0'),
+      autoRange ? String.fromCharCode(autoRange) : '-'
+    ];
+    lines.push(row.map(csvEscape).join(','));
+  }
+  return lines.join('\n');
+}
 async function downloadCsvFromBin(file){
   try{
     toast('Downloading BIN...');
@@ -461,11 +595,34 @@ async function downloadCsvFromBin(file){
     if(!r.ok) throw new Error(await r.text());
     const buffer=await r.arrayBuffer();
     toast('Converting CSV...');
-    const csv=cvBinToCsv(buffer);
+    const csv=cvBinToCompactCsv(buffer);
     const name=file.split('/').pop().replace(/\.bin$/i,'.csv');
     downloadBlob(name,'text/csv',csv);
     toast('CSV ready');
   }catch(e){
+    toast('CSV error: '+e.message);
+  }
+}
+async function convertLocalBinToCsv(){
+  const input=$('localBinFile');
+  const status=$('localBinStatus');
+  const file=input && input.files ? input.files[0] : null;
+  if(!file){
+    if(status) status.textContent='Choose a BIN file first.';
+    toast('Choose a BIN file first');
+    return;
+  }
+  try{
+    if(status) status.textContent='Reading '+file.name+'...';
+    toast('Converting CSV...');
+    const buffer=await file.arrayBuffer();
+    const csv=cvBinToDebugCsv(buffer);
+    const name=file.name.replace(/\.bin$/i,'')+'.csv';
+    downloadBlob(name,'text/csv',csv);
+    if(status) status.textContent='Converted '+file.name+' to '+name+'.';
+    toast('CSV ready');
+  }catch(e){
+    if(status) status.textContent='CSV error: '+e.message;
     toast('CSV error: '+e.message);
   }
 }
