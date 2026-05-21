@@ -8,6 +8,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
+#include <ESPmDNS.h>
 #include <time.h>
 #include "esp_system.h"
 #if __has_include(<esp_wpa2.h>)
@@ -350,6 +351,7 @@ static QueueHandle_t loggerQueue = nullptr;
 static QueueHandle_t sdRecordQueue = nullptr;
 
 static bool initSdCard();
+static String wifiMdnsUrl();
 static bool wifiPortalApActive();
 static String wifiPortalApSsid();
 void vibrationOn(uint8_t duty);
@@ -708,7 +710,7 @@ static TftStatusText buildTftStatusText() {
   if (WiFi.status() == WL_CONNECTED) {
     text.wifiLine1 = String("WiFi STA: ") + WiFi.SSID();
     text.wifiLine2 = String("Access: http://") + WiFi.localIP().toString();
-    text.wifiLine3 = "";
+    text.wifiLine3 = String("Local: ") + wifiMdnsUrl();
   } else if (wifiPortalApActive()) {
     text.wifiLine1 = "WiFi STA: not connected";
     text.wifiLine2 = String("Setup AP: ") + wifiPortalApSsid();
@@ -2318,8 +2320,8 @@ void measurementTask(void *pvParameters) {
 
 #if ENABLE_TFT_DISPLAY
 void printRtcTimeLine(const String &line) {
-  lcd.fillRect(10, 212, 260, 12, TFT_BLACK);
-  lcd.setCursor(10, 212);
+  lcd.fillRect(10, 230, 260, 12, TFT_BLACK);
+  lcd.setCursor(10, 230);
   lcd.println(line);
 }
 
@@ -2352,7 +2354,7 @@ void drawStatusPanel() {
   lcd.setTextColor(TFT_WHITE, TFT_BLACK);
 
   lcd.setTextSize(1);
-  lcd.fillRect(10, 122, 460, 145, TFT_BLACK);
+  lcd.fillRect(10, 122, 460, 165, TFT_BLACK);
   lcd.setCursor(10, 122);
   lcd.println(text.wifiLine1);
   if (text.wifiLine2.length() > 0) {
@@ -2364,18 +2366,18 @@ void drawStatusPanel() {
     lcd.println(text.wifiLine3);
   }
 
-  lcd.setCursor(10, 176);
+  lcd.setCursor(10, 194);
   lcd.println(text.sdLine);
 
-  lcd.setCursor(10, 194);
+  lcd.setCursor(10, 212);
   lcd.println(text.rtcLine);
 
   printRtcTimeLine(text.rtcTimeLine);
 
-  lcd.setCursor(10, 230);
+  lcd.setCursor(10, 248);
   lcd.println(text.stateLine);
 
-  lcd.setCursor(10, 248);
+  lcd.setCursor(10, 266);
   lcd.println("Use web app for CV/SWV/DPV setup and files.");
 
   lcd.endWrite();
@@ -3120,10 +3122,26 @@ static WebServer wifiServer(80);
 static DNSServer wifiDns;
 static bool wifiServerStarted = false;
 static bool wifiApMode = false;
+static bool wifiMdnsStarted = false;
 static bool wifiConnectRequested = false;
 static bool vibrationTestActive = false;
 static uint32_t wifiLastRetryMs = 0;
 static String wifiApSsid = "smart-ec-Setup";
+
+static String wifiDeviceIdSuffix() {
+  uint64_t mac = ESP.getEfuseMac();
+  char suffix[7];
+  snprintf(suffix, sizeof(suffix), "%06X", (uint32_t)(mac & 0xFFFFFF));
+  return String(suffix);
+}
+
+static String wifiMdnsHost() {
+  return String("smart-ec-") + wifiDeviceIdSuffix();
+}
+
+static String wifiMdnsUrl() {
+  return String("http://") + wifiMdnsHost() + ".local";
+}
 
 static bool wifiPortalApActive() {
   return wifiApMode;
@@ -3377,6 +3395,8 @@ static bool connectWifiCredential(WifiCredential &c, uint32_t timeoutMs) {
   Serial.println();
 
   WiFi.mode(WIFI_STA);
+  String host = wifiMdnsHost();
+  WiFi.setHostname(host.c_str());
   WiFi.setSleep(false);
   WiFi.disconnect(false, false);
   delay(80);
@@ -3503,6 +3523,11 @@ static String wifiStatusHtml() {
     s += htmlEscape(WiFi.SSID());
     s += F("</b><br>IP: ");
     s += WiFi.localIP().toString();
+    s += F("<br>Local URL: <a href='");
+    s += htmlEscape(wifiMdnsUrl());
+    s += F("'>");
+    s += htmlEscape(wifiMdnsUrl());
+    s += F("</a>");
     s += F("</p>");
   } else {
     s += F("<p class='warn'>Not connected. AP portal is active.</p>");
@@ -3596,6 +3621,10 @@ static String wifiStatusJson() {
   json += jsonEscape(WiFi.status() == WL_CONNECTED ? WiFi.SSID() : String(""));
   json += F("\",\"ip\":\"");
   json += jsonEscape(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String(""));
+  json += F("\",\"hostname\":\"");
+  json += jsonEscape(wifiMdnsHost());
+  json += F("\",\"local_url\":\"");
+  json += jsonEscape((WiFi.status() == WL_CONNECTED) ? wifiMdnsUrl() : String(""));
   json += F("\",\"rssi\":");
   if (WiFi.status() == WL_CONNECTED) {
     json += String(WiFi.RSSI());
@@ -4478,11 +4507,31 @@ static void startWifiWebServer() {
   Serial.println("WiFi web server started.");
 }
 
+static void updateWifiMdns() {
+  if (WiFi.status() == WL_CONNECTED) {
+    if (wifiMdnsStarted) return;
+
+    String host = wifiMdnsHost();
+    if (MDNS.begin(host.c_str())) {
+      MDNS.addService("http", "tcp", 80);
+      wifiMdnsStarted = true;
+      Serial.print("mDNS started: ");
+      Serial.println(wifiMdnsUrl());
+    } else {
+      Serial.println("mDNS start failed.");
+    }
+    return;
+  }
+
+  if (wifiMdnsStarted) {
+    MDNS.end();
+    wifiMdnsStarted = false;
+    Serial.println("mDNS stopped.");
+  }
+}
+
 static void startWifiPortal() {
-  uint64_t mac = ESP.getEfuseMac();
-  char suffix[7];
-  snprintf(suffix, sizeof(suffix), "%06X", (uint32_t)(mac & 0xFFFFFF));
-  wifiApSsid = String("smart-ec-Setup-") + suffix;
+  wifiApSsid = String("smart-ec-Setup-") + wifiDeviceIdSuffix();
 
   // If the web server routes were already registered earlier, only re-enable the AP radio.
   // This lets the setup portal come back after STA disconnects without registering routes twice.
@@ -4604,10 +4653,13 @@ static void wifiManagerLoop() {
   if (WiFi.status() == WL_CONNECTED) {
     startWifiWebServer();
     stopWifiPortalIfConnected();
+    updateWifiMdns();
     maybeSyncUtcAfterWifiConnected();
     requestTftRefreshOnStatusChange();
     return;
   }
+
+  updateWifiMdns();
 
   uint32_t nowMs = millis();
   if (wifiConnectRequested || (!wifiApMode && nowMs - wifiLastRetryMs > WIFI_RETRY_PERIOD_MS)) {

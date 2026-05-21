@@ -317,8 +317,9 @@ async function loadStatus(){
     const signalLine=hasRssi ? `<span class="signal-row"><span class="signal-bars level-${wifiSignalLevel(rssi)}"><span></span><span></span><span></span><span></span></span><span>Signal: <b>${signal}</b> (${rssi} dBm)</span></span>` : '';
     $('dot').classList.toggle('ok', s.connected);
     $('statusTitle').textContent=s.connected?'Connected':'Setup Portal Active';
-    $('statusSub').textContent=s.connected?`${s.sta_ssid} - ${s.ip}`:'Not connected to WiFi yet';
-    $('apInfo').innerHTML=signalLine+(s.ap_active?`AP: <b>${escapeHtml(s.ap_ssid)}</b><br>Password: <b>${escapeHtml(s.ap_password)}</b><br>Open: <b>192.168.4.1</b>`:`Saved networks: ${s.saved_count}`);
+    $('statusSub').textContent=s.connected?`${s.sta_ssid} - ${s.local_url||s.ip}`:'Not connected to WiFi yet';
+    const localLine=s.connected&&s.local_url?`Local URL: <b>${escapeHtml(s.local_url)}</b><br>IP: <b>${escapeHtml(s.ip)}</b><br>`:'';
+    $('apInfo').innerHTML=signalLine+(s.ap_active?`AP: <b>${escapeHtml(s.ap_ssid)}</b><br>Password: <b>${escapeHtml(s.ap_password)}</b><br>Open: <b>192.168.4.1</b>`:`${localLine}Saved networks: ${s.saved_count}`);
   }
   catch(e){ $('statusTitle').textContent='Status error'; $('statusSub').textContent=e.message; }
 }
