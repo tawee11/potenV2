@@ -4,10 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>smart-ec Control</title>
+  <script src="/plotly.min.js?v=20260522" defer onerror="this.onerror=null;this.src='https://cdn.plot.ly/plotly-2.35.2.min.js'"></script>
   <style>
     :root{--bg:#f4f8fb;--panel:#fff;--ink:#142033;--muted:#66758c;--line:#d9e5f4;--primary:#0f766e;--accent:#38bdf8;--ok:#138a4d;--warn:#b45309;--danger:#dc2626;--soft:#f7fbff;--shadow:0 14px 40px rgba(22,45,82,.12);--radius:16px}
-    *{box-sizing:border-box}body{margin:0;min-height:100vh;font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--ink);background:var(--bg)}.wrap{width:min(1040px,100%);margin:auto;padding:14px}.hero,.grid{display:grid;gap:14px;grid-template-columns:1.2fr .8fr}.card,.brand,.status-card{background:var(--panel);border:1px solid var(--line);box-shadow:var(--shadow);border-radius:var(--radius);padding:18px}.brand,.status-card{padding:12px 14px}.brand h1{margin:4px 0;font-size:28px}.brand p,.small{color:var(--muted);line-height:1.45}.brand p{margin:0;font-size:14px}.chip{display:inline-flex;padding:4px 9px;border-radius:999px;background:#dffaf3;color:#075e54;font-size:12px;font-weight:800}.status-row{display:flex;gap:10px;align-items:center}.dot{width:10px;height:10px;border-radius:50%;background:var(--warn)}.dot.ok{background:var(--ok)}.dot.run{background:#2563eb}.dot.done{background:var(--ok)}.dot.err{background:var(--danger)}.status-title{font-weight:850}.status-sub{font-size:13px;color:var(--muted);margin-top:3px;word-break:break-word}.signal-row{display:flex;gap:8px;align-items:flex-end;margin:8px 0 2px}.signal-bars{display:inline-flex;gap:3px;align-items:flex-end;height:18px}.signal-bars span{width:6px;border-radius:3px;background:#cbd5e1}.signal-bars span:nth-child(1){height:6px}.signal-bars span:nth-child(2){height:10px}.signal-bars span:nth-child(3){height:14px}.signal-bars span:nth-child(4){height:18px}.signal-bars.level-1 span:nth-child(-n+1),.signal-bars.level-2 span:nth-child(-n+2),.signal-bars.level-3 span:nth-child(-n+3),.signal-bars.level-4 span:nth-child(-n+4){background:var(--primary)}.measure-state{display:grid;gap:10px;margin:12px 0;padding:12px;border:1px solid var(--line);border-radius:14px;background:var(--soft)}.measure-head{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.measure-pill{display:inline-flex;align-items:center;gap:8px;font-weight:900}.bar{height:12px;border-radius:999px;background:#dbe7f5;overflow:hidden}.bar-fill{height:100%;width:0%;background:#0f766e;transition:width .2s}.measure-grid{display:grid;gap:8px;grid-template-columns:repeat(4,1fr)}.measure-box{border:1px solid var(--line);border-radius:12px;background:#fff;padding:9px}.measure-box b{display:block;font-size:13px;color:#334155}.measure-box span{font-size:14px;color:var(--muted)}.field{margin:10px 0}.label{display:block;font-size:13px;font-weight:800;color:#334155;margin-bottom:6px}input,select{width:100%;border:1px solid var(--line);border-radius:12px;padding:11px 12px;font-size:15px;background:#fff;outline:none}input:focus,select:focus{border-color:#0d9488;box-shadow:0 0 0 3px rgba(20,184,166,.14)}.check{display:flex;gap:10px;align-items:center;padding:11px 12px;border:1px solid var(--line);border-radius:12px;background:var(--soft)}.check input{width:auto}.actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:12px}button{border:0;border-radius:12px;padding:11px 13px;font-weight:850;font-size:14px;cursor:pointer;background:#e7f0fb;color:#1f365c}button.primary{background:linear-gradient(135deg,var(--primary),var(--accent));color:#fff}button.danger{background:#fee2e2;color:var(--danger)}button.ghost{background:#f3f7fb;color:#334155}button.active,.tab.active{background:#0f766e;color:#fff}.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.tab{min-width:112px;background:#e7f0fb;color:#1f365c}.tab-panel{display:block}.list{display:grid;gap:10px}.item,.scan{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;border:1px solid var(--line);border-radius:14px;padding:12px;background:#fff}.ssid{font-weight:900}.meta,.rssi{color:var(--muted);font-size:13px}.scan-list{max-height:340px;overflow:auto;display:grid;gap:9px}.hide{display:none!important}.toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);max-width:min(92vw,520px);background:#111827;color:#fff;padding:13px 16px;border-radius:14px;box-shadow:var(--shadow);opacity:0;pointer-events:none;transition:.2s}.toast.show{opacity:1}
-    @media(max-width:820px){.hero,.grid,.measure-grid{grid-template-columns:1fr}.wrap{padding:12px}.brand h1{font-size:32px}}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--ink);background:var(--bg)}.wrap{width:min(1040px,100%);margin:auto;padding:14px}.hero,.grid{display:grid;gap:14px;grid-template-columns:1.2fr .8fr}.card,.brand,.status-card{background:var(--panel);border:1px solid var(--line);box-shadow:var(--shadow);border-radius:var(--radius);padding:18px}.brand,.status-card{padding:12px 14px}.brand h1{margin:4px 0;font-size:28px}.brand p,.small{color:var(--muted);line-height:1.45}.brand p{margin:0;font-size:14px}.chip{display:inline-flex;padding:4px 9px;border-radius:999px;background:#dffaf3;color:#075e54;font-size:12px;font-weight:800}.status-row{display:flex;gap:10px;align-items:center}.dot{width:10px;height:10px;border-radius:50%;background:var(--warn)}.dot.ok{background:var(--ok)}.dot.run{background:#2563eb}.dot.done{background:var(--ok)}.dot.err{background:var(--danger)}.status-title{font-weight:850}.status-sub{font-size:13px;color:var(--muted);margin-top:3px;word-break:break-word}.signal-row{display:flex;gap:8px;align-items:flex-end;margin:8px 0 2px}.signal-bars{display:inline-flex;gap:3px;align-items:flex-end;height:18px}.signal-bars span{width:6px;border-radius:3px;background:#cbd5e1}.signal-bars span:nth-child(1){height:6px}.signal-bars span:nth-child(2){height:10px}.signal-bars span:nth-child(3){height:14px}.signal-bars span:nth-child(4){height:18px}.signal-bars.level-1 span:nth-child(-n+1),.signal-bars.level-2 span:nth-child(-n+2),.signal-bars.level-3 span:nth-child(-n+3),.signal-bars.level-4 span:nth-child(-n+4){background:var(--primary)}.measure-state{display:grid;gap:10px;margin:12px 0;padding:12px;border:1px solid var(--line);border-radius:14px;background:var(--soft)}.measure-head{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.measure-pill{display:inline-flex;align-items:center;gap:8px;font-weight:900}.bar{height:12px;border-radius:999px;background:#dbe7f5;overflow:hidden}.bar-fill{height:100%;width:0%;background:#0f766e;transition:width .2s}.measure-grid{display:grid;gap:8px;grid-template-columns:repeat(4,1fr)}.measure-box{border:1px solid var(--line);border-radius:12px;background:#fff;padding:9px}.measure-box b{display:block;font-size:13px;color:#334155}.measure-box span{font-size:14px;color:var(--muted)}.chart-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}.chart-box{min-height:330px;border:1px solid var(--line);border-radius:14px;background:#fff;overflow:hidden}.modal-backdrop{position:fixed;inset:0;background:rgba(15,23,42,.48);display:flex;align-items:center;justify-content:center;padding:18px;z-index:20}.modal{width:min(1120px,100%);max-height:92vh;overflow:auto;background:#fff;border:1px solid var(--line);border-radius:16px;box-shadow:0 24px 70px rgba(15,23,42,.28);padding:18px}.modal-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}.modal-chart{min-height:520px;border:1px solid var(--line);border-radius:14px;margin-top:12px}.field{margin:10px 0}.label{display:block;font-size:13px;font-weight:800;color:#334155;margin-bottom:6px}input,select{width:100%;border:1px solid var(--line);border-radius:12px;padding:11px 12px;font-size:15px;background:#fff;outline:none}input:focus,select:focus{border-color:#0d9488;box-shadow:0 0 0 3px rgba(20,184,166,.14)}.check{display:flex;gap:10px;align-items:center;padding:11px 12px;border:1px solid var(--line);border-radius:12px;background:var(--soft)}.check input{width:auto}.actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:12px}button{border:0;border-radius:12px;padding:11px 13px;font-weight:850;font-size:14px;cursor:pointer;background:#e7f0fb;color:#1f365c}button.primary{background:linear-gradient(135deg,var(--primary),var(--accent));color:#fff}button.danger{background:#fee2e2;color:var(--danger)}button.ghost{background:#f3f7fb;color:#334155}button.active,.tab.active{background:#0f766e;color:#fff}.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.tab{min-width:112px;background:#e7f0fb;color:#1f365c}.tab-panel{display:block}.list{display:grid;gap:10px}.item,.scan{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;border:1px solid var(--line);border-radius:14px;padding:12px;background:#fff}.ssid{font-weight:900}.meta,.rssi{color:var(--muted);font-size:13px}.scan-list{max-height:340px;overflow:auto;display:grid;gap:9px}.hide{display:none!important}.toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);max-width:min(92vw,520px);background:#111827;color:#fff;padding:13px 16px;border-radius:14px;box-shadow:var(--shadow);opacity:0;pointer-events:none;transition:.2s;z-index:30}.toast.show{opacity:1}
+    @media(max-width:820px){.hero,.grid,.measure-grid,.chart-grid{grid-template-columns:1fr}.wrap{padding:12px}.brand h1{font-size:32px}.chart-box{min-height:280px}}
   </style>
 </head>
 <body>
@@ -169,6 +170,22 @@
         </div>
         <div class="actions"><button class="primary" type="submit">Start DPV</button><button class="ghost" type="button" onclick="saveDpvConfig()">Save DPV Params</button></div>
       </form>
+      <section style="margin-top:14px;border-top:1px solid var(--line);padding-top:14px">
+        <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap">
+          <div>
+            <h2 style="margin:0">Measurement Charts</h2>
+            <p id="chartStatus" class="small">Live preview waits for the first sample.</p>
+          </div>
+          <div class="actions" style="margin-top:0">
+            <button class="ghost" type="button" onclick="clearLiveCharts()">Clear Live</button>
+            <button class="ghost" type="button" onclick="loadFinalChartFromActiveFile()">Load BIN Detail</button>
+          </div>
+        </div>
+        <div class="chart-grid">
+          <div id="chartVI" class="chart-box"></div>
+          <div id="chartTime" class="chart-box"></div>
+        </div>
+      </section>
     </section>
     </div>
 
@@ -197,6 +214,13 @@
           <div class="field"><label class="label" for="localBinFile">BIN file</label><input id="localBinFile" type="file" accept=".bin,application/octet-stream"></div>
           <div class="actions"><button class="primary" type="button" onclick="convertLocalBinToCsv()">Convert CSV</button></div>
           <p id="localBinStatus" class="small"></p>
+        </div>
+        <div style="border:1px solid var(--line);border-radius:14px;padding:14px;background:var(--soft)">
+          <h3 style="margin:0 0 8px">Device Assets</h3>
+          <p class="small">Upload files to the SD card asset folder /device_assets.</p>
+          <div class="field"><label class="label" for="deviceAssetFile">Upload file</label><input id="deviceAssetFile" type="file" accept=".js,application/javascript,text/javascript"></div>
+          <div class="actions"><button class="primary" type="button" onclick="uploadDeviceAsset()">Upload File</button><button class="ghost" type="button" onclick="checkDeviceAssets()">Check Assets</button></div>
+          <p id="plotlyAssetStatus" class="small"></p>
         </div>
         <div style="border:1px solid var(--line);border-radius:14px;padding:14px;background:var(--soft)">
           <h3 style="margin:0 0 8px">OTA Update</h3>
@@ -240,6 +264,20 @@
     </section>
     </div>
   </div>
+  <div id="previewModal" class="modal-backdrop hide" onclick="closePreviewModal()">
+    <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal-head">
+        <div>
+          <h2 id="previewTitle" style="margin:0">Measurement Preview</h2>
+          <p id="previewStatus" class="small">Loading...</p>
+        </div>
+        <div class="actions" style="margin-top:0">
+          <button class="ghost" type="button" onclick="closePreviewModal()">Close</button>
+        </div>
+      </div>
+      <div id="previewChart" class="modal-chart"></div>
+    </div>
+  </div>
   <div id="toast" class="toast"></div>
 
 <script>
@@ -248,6 +286,12 @@ let measurementStateKnown=false;
 let measurementWasActive=false;
 let currentMeasurementActive=false;
 let activeMeasurementMode='CV';
+let activeMeasurementFile='';
+let liveMeasurementFile='';
+let plottedFinalFile='';
+let liveChartKey='';
+let chartRevision=0;
+const liveSeries={e:[], i:[], t:[], sample:[]};
 function toast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2200); }
 async function getJson(url, opts={}){
   const r=await fetch(url, opts);
@@ -318,7 +362,7 @@ async function loadStatus(){
     $('dot').classList.toggle('ok', s.connected);
     $('statusTitle').textContent=s.connected?'Connected':'Setup Portal Active';
     $('statusSub').textContent=s.connected?`${s.sta_ssid} - ${s.local_url||s.ip}`:'Not connected to WiFi yet';
-    const localLine=s.connected&&s.local_url?`Local URL: <b>${escapeHtml(s.local_url)}</b><br>IP: <b>${escapeHtml(s.ip)}</b><br>`:'';
+    const localLine=s.connected&&s.local_url?`IP: <b>${escapeHtml(s.ip)}</b><br>`:'';
     $('apInfo').innerHTML=signalLine+(s.ap_active?`AP: <b>${escapeHtml(s.ap_ssid)}</b><br>Password: <b>${escapeHtml(s.ap_password)}</b><br>Open: <b>192.168.4.1</b>`:`${localLine}Saved networks: ${s.saved_count}`);
   }
   catch(e){ $('statusTitle').textContent='Status error'; $('statusSub').textContent=e.message; }
@@ -375,6 +419,150 @@ function updateMeasureStatePanel(m, measurementActive){
   $('measureRecords').textContent=`${Number(m.sd_records_written||0)} written / ${Number(m.sd_records_dropped||0)} dropped`;
   $('measureFile').textContent=m.cv_file||'-';
 }
+function plotlyReady(){
+  return !!(window.Plotly && $('chartVI') && $('chartTime'));
+}
+function chartLayout(title, xTitle, yTitle){
+  return {title:{text:title,font:{size:15}},margin:{l:58,r:116,t:44,b:52},paper_bgcolor:'#fff',plot_bgcolor:'#fff',xaxis:{title:xTitle,zeroline:false,gridcolor:'#e5edf6'},yaxis:{title:yTitle,zeroline:false,gridcolor:'#e5edf6'},legend:{orientation:'v',x:1.08,y:1,xanchor:'left',yanchor:'top',font:{size:10},itemsizing:'constant',itemwidth:30},font:{family:'Inter, system-ui, sans-serif',size:12,color:'#142033'}};
+}
+function renderIvChart(targetId, series, label){
+  if(!plotlyReady()) return false;
+  const layout=chartLayout('I vs E','E (V)','I (uA)');
+  layout.datarevision=++chartRevision;
+  Plotly.react(targetId,[{x:series.e.slice(),y:series.i.slice(),mode:'lines+markers',type:'scattergl',name:label||'Preview',line:{color:'#0f766e',width:2},marker:{size:4}}],layout,{responsive:true,displaylogo:false});
+  return true;
+}
+function renderCharts(series, sourceLabel){
+  if(!plotlyReady()){
+    $('chartStatus').textContent='Plotly is not loaded. Upload /device_assets/plotly.min.js to SD card, then refresh this page.';
+    return;
+  }
+  const label=sourceLabel||'Live';
+  chartRevision++;
+  const timeLayout=chartLayout('E and I vs Time','Time (s)','I (uA)');
+  timeLayout.yaxis2={title:'E (V)',overlaying:'y',side:'right',zeroline:false,gridcolor:'#e5edf6'};
+  const viLayout=chartLayout('I vs E','E (V)','I (uA)');
+  viLayout.datarevision=chartRevision;
+  timeLayout.datarevision=chartRevision;
+  Plotly.react('chartVI',[{x:series.e.slice(),y:series.i.slice(),mode:'lines+markers',type:'scattergl',name:label,line:{color:'#0f766e',width:2},marker:{size:4}}],viLayout,{responsive:true,displaylogo:false});
+  Plotly.react('chartTime',[{x:series.t.slice(),y:series.i.slice(),mode:'lines',type:'scattergl',name:'I (uA)',line:{color:'#0f766e',width:2}},{x:series.t.slice(),y:series.e.slice(),mode:'lines',type:'scattergl',name:'E (V)',yaxis:'y2',line:{color:'#2563eb',width:2}}],timeLayout,{responsive:true,displaylogo:false});
+  $('chartStatus').textContent=`${label}: ${series.e.length} points`;
+}
+function clearLiveCharts(){
+  liveSeries.e=[]; liveSeries.i=[]; liveSeries.t=[]; liveSeries.sample=[]; liveSeries.t0=null;
+  liveMeasurementFile='';
+  liveChartKey='';
+  plottedFinalFile='';
+  renderCharts(liveSeries,'Live');
+}
+function appendLivePoint(m){
+  const latest=m.latest;
+  if(!latest) return;
+  const file=m.cv_file||'live';
+  if(liveMeasurementFile!==file){
+    liveMeasurementFile=file;
+    clearLiveCharts();
+    liveMeasurementFile=file;
+  }
+  const key=[file,latest.mode,latest.sample_index,latest.timestamp_us].join(':');
+  if(key===liveChartKey) return;
+  liveChartKey=key;
+  const e=Number(latest.potential_v);
+  const i=Number(latest.current_a)*1000000;
+  const ts=Number(latest.timestamp_us||0);
+  if(!Number.isFinite(e)||!Number.isFinite(i)) return;
+  if(liveSeries.t0===null) liveSeries.t0=ts;
+  liveSeries.e.push(e);
+  liveSeries.i.push(i);
+  liveSeries.sample.push(Number(latest.sample_index||liveSeries.sample.length));
+  liveSeries.t.push(Number.isFinite(ts)&&ts>0 ? (ts-liveSeries.t0)/1000000 : liveSeries.t.length);
+  renderCharts(liveSeries,'Live preview');
+}
+function measurementBinToSeries(buffer){
+  const view=new DataView(buffer);
+  const headerSize=view.getUint16(10,true);
+  const recordSize=view.getUint32(12,true);
+  const magic=readCString(view,0,8);
+  if((magic!=='POTCVB1' && magic!=='POTSWV1' && magic!=='POTDPV1') || headerSize!==104 || recordSize!==56) throw new Error('Invalid measurement binary format');
+  const series={e:[],i:[],t:[],sample:[]};
+  let t0=null;
+  for(let off=headerSize; off+recordSize<=buffer.byteLength; off+=recordSize){
+    const ts=Number(getU64(view,off+8));
+    if(t0===null) t0=ts;
+    series.sample.push(view.getUint32(off,true));
+    series.t.push(Number.isFinite(ts) ? (ts-t0)/1000000 : series.t.length);
+    series.e.push(view.getFloat32(off+20,true));
+    series.i.push(view.getFloat32(off+48,true)*1000000);
+  }
+  return {magic,series};
+}
+function isMeasurementBinPath(file){
+  const name=String(file||'').split('/').pop();
+  return /^(cv|swv|dpv)_.*\.bin$/i.test(name);
+}
+async function plotBinFile(file, silent=false){
+  if(!file || file==='-' || !isMeasurementBinPath(file)){
+    if(!silent) toast('No BIN file is available yet');
+    return;
+  }
+  if(currentMeasurementActive){
+    if(!silent) toast('Stop measurement before loading BIN detail');
+    return;
+  }
+  try{
+    if(!silent) toast('Loading BIN detail...');
+    $('chartStatus').textContent='Measurement finished. Loading full-resolution BIN chart...';
+    const r=await fetch('/api/cv/download-bin?file='+encodeURIComponent(file));
+    if(!r.ok) throw new Error(await r.text());
+    const parsed=measurementBinToSeries(await r.arrayBuffer());
+    plottedFinalFile=file;
+    renderCharts(parsed.series,`${parsed.magic} detail`);
+    if(!silent) toast('BIN detail plotted');
+  }catch(e){
+    if(!silent) toast('Plot error: '+e.message);
+    $('chartStatus').textContent='Plot error: '+e.message;
+  }
+}
+function loadFinalChartFromActiveFile(){
+  plotBinFile(activeMeasurementFile||$('measureFile').textContent);
+}
+function closePreviewModal(){
+  $('previewModal').classList.add('hide');
+}
+function clearPreviewChart(){
+  if(window.Plotly && $('previewChart')) {
+    Plotly.purge('previewChart');
+  } else if($('previewChart')) {
+    $('previewChart').innerHTML='';
+  }
+}
+async function previewBinFile(file){
+  if(!isMeasurementBinPath(file)){
+    toast('No BIN preview available');
+    return;
+  }
+  if(currentMeasurementActive){
+    toast('Stop measurement before previewing BIN');
+    return;
+  }
+  $('previewModal').classList.remove('hide');
+  $('previewTitle').textContent=file.split('/').pop();
+  $('previewStatus').textContent='Loading preview...';
+  clearPreviewChart();
+  try{
+    const r=await fetch('/api/cv/download-bin?file='+encodeURIComponent(file));
+    if(!r.ok) throw new Error(await r.text());
+    const parsed=measurementBinToSeries(await r.arrayBuffer());
+    if(!renderIvChart('previewChart',parsed.series,parsed.magic)){
+      $('previewStatus').textContent='Plotly is not loaded. Upload /device_assets/plotly.min.js to SD card, then refresh this page.';
+      return;
+    }
+    $('previewStatus').textContent=`${parsed.magic}: ${parsed.series.e.length} points`;
+  }catch(e){
+    $('previewStatus').textContent='Preview error: '+e.message;
+    toast('Preview error');
+  }
+}
 async function loadMeasurement(){
   try{
     const m=await getJson('/api/measurement/status');
@@ -383,9 +571,11 @@ async function loadMeasurement(){
     ['swvVibrationTest','dpvVibrationTest'].forEach(id=>{ if($(id)) $(id).disabled=measurementActive; });
     updateModeForms(m.mode);
     updateMeasureStatePanel(m, measurementActive);
+    if(!measurementActive && m.cv_file) activeMeasurementFile=m.cv_file;
     $('measurementStatus').textContent=`${m.running?'Running':'Stopped'} - mode ${m.mode}${m.busy?' - sampling':''} - SD ${m.sd_mounted?'OK':'not mounted'} - RTC ${m.rtc_utc_synced?'UTC synced':'not synced'} - ${m.cv_file||''}`;
     if(m.latest){
       $('measurementLatest').innerHTML=`Latest: ${escapeHtml(m.latest.mode)} - ${escapeHtml(m.latest.direction)} - E ${Number(m.latest.potential_v||0).toFixed(3)} V - DAC ${Number(m.latest.dac_set_v).toFixed(3)} V - ADC ${Number(m.latest.adc_v).toFixed(6)} V - I ${(Number(m.latest.current_a)*1000000).toFixed(3)} uA - records ${m.sd_records_written}/${m.sd_records_dropped}`;
+      if(measurementActive) appendLivePoint(m);
     }else{
       $('measurementLatest').textContent='No measurement sample yet.';
     }
@@ -400,13 +590,14 @@ async function loadMeasurement(){
     }
     if(measurementStateKnown && measurementWasActive && !measurementActive){
       loadCvFiles();
+      if(isMeasurementBinPath(m.cv_file) && Number(m.sd_records_written||0)>0 && plottedFinalFile!==m.cv_file) plotBinFile(m.cv_file,true);
     }
     measurementWasActive=measurementActive;
     measurementStateKnown=true;
   }catch(e){ $('measurementStatus').textContent='Measurement status error: '+e.message; }
 }
 async function setMode(mode){ updateModeForms(mode); await getJson('/api/measurement/mode',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'mode='+encodeURIComponent(mode)}); toast('Mode set to '+mode); loadMeasurement(); }
-async function startMeasurement(){ await getJson('/api/measurement/start',{method:'POST'}); toast('Measurement started'); loadMeasurement(); }
+async function startMeasurement(){ clearLiveCharts(); await getJson('/api/measurement/start',{method:'POST'}); toast('Measurement started'); loadMeasurement(); }
 async function stopMeasurement(){ await getJson('/api/measurement/stop',{method:'POST'}); toast('Measurement stopped'); loadMeasurement(); }
 async function testVibration(mode){
   if(currentMeasurementActive){
@@ -437,7 +628,7 @@ async function loadCvFiles(){
     const data=await getJson('/api/cv/files');
     if(!data.files.length){ box.innerHTML='<p class="small">No measurement files on SD card.</p>'; return; }
     const files=(data.files||[]).slice().sort(compareCvFilesNewestFirst);
-    box.innerHTML=files.map(f=>`<div class="item"><div><div class="ssid">${escapeHtml(f.name)}</div><div class="meta">${Number(f.size||0)} bytes</div></div><div class="actions" style="margin-top:0"><button class="danger" type="button" onclick="deleteCvFile('${jsString(f.name)}')">Del</button><a href="/api/cv/download-bin?file=${encodeURIComponent(f.name)}"><button type="button">BIN</button></a><button type="button" onclick="downloadCsvFromBin('${jsString(f.name)}')">CSV</button></div></div>`).join('');
+    box.innerHTML=files.map(f=>`<div class="item"><div><div class="ssid">${escapeHtml(f.name)}</div><div class="meta">${Number(f.size||0)} bytes</div></div><div class="actions" style="margin-top:0"><button type="button" onclick="previewBinFile('${jsString(f.name)}')">Preview</button><button class="danger" type="button" onclick="deleteCvFile('${jsString(f.name)}')">Del</button><a href="/api/cv/download-bin?file=${encodeURIComponent(f.name)}"><button type="button">BIN</button></a><button type="button" onclick="downloadCsvFromBin('${jsString(f.name)}')">CSV</button></div></div>`).join('');
   }catch(e){
     box.innerHTML=`<p class="small">File list error: ${escapeHtml(e.message)}</p>`;
   }
@@ -627,6 +818,44 @@ async function convertLocalBinToCsv(){
     toast('CSV error: '+e.message);
   }
 }
+async function uploadDeviceAsset(){
+  const input=$('deviceAssetFile');
+  const status=$('plotlyAssetStatus');
+  const file=input && input.files ? input.files[0] : null;
+  if(!file){
+    if(status) status.textContent='Choose a file first.';
+    toast('Choose a file first');
+    return;
+  }
+  const form=new FormData();
+  form.append('file',file,file.name);
+  try{
+    if(status) status.textContent='Uploading '+file.name+'...';
+    const r=await fetch('/api/assets/upload-plotly',{method:'POST',body:form});
+    const text=await r.text();
+    let data={};
+    try{ data=JSON.parse(text); }catch(e){}
+    if(!r.ok) throw new Error(data.message||text||'Upload failed');
+    if(status) status.textContent=(data.message||'Uploaded to /device_assets/plotly.min.js')+(data.bytes!=null?` (${data.bytes} bytes)`:'');
+    toast('File uploaded');
+    checkDeviceAssets();
+  }catch(e){
+    if(status) status.textContent='Upload error: '+e.message;
+    toast('Upload error: '+e.message);
+  }
+}
+async function checkDeviceAssets(){
+  const status=$('plotlyAssetStatus');
+  try{
+    const s=await getJson('/api/assets/status');
+    const size=Number(s.plotly_size||0);
+    if(status) status.textContent=s.plotly_exists?`Found ${s.plotly_path} (${size} bytes)`:`Not found: ${s.plotly_path}`;
+    toast(s.plotly_exists?'Asset found':'Asset not found');
+  }catch(e){
+    if(status) status.textContent='Asset check error: '+e.message;
+    toast('Asset check error');
+  }
+}
 function cvParams(){ const fd=new FormData($('cvForm')); fd.set('mode','CV'); return new URLSearchParams(fd); }
 function swvParams(){
   const fd=new FormData($('swvForm'));
@@ -646,11 +875,11 @@ async function saveCvConfig(){ await getJson('/api/measurement/cv',{method:'POST
 async function saveSwvConfig(){ await getJson('/api/measurement/swv',{method:'POST',body:swvParams()}); $('swvForm').dataset.dirty=''; toast('SWV parameters saved'); loadMeasurement(); }
 async function saveDpvConfig(){ await getJson('/api/measurement/dpv',{method:'POST',body:dpvParams()}); $('dpvForm').dataset.dirty=''; toast('DPV parameters saved'); loadMeasurement(); }
 $('cvForm').addEventListener('input',()=>{$('cvForm').dataset.dirty='1';});
-$('cvForm').addEventListener('submit',async(ev)=>{ ev.preventDefault(); await getJson('/api/measurement/start',{method:'POST',body:cvParams()}); $('cvForm').dataset.dirty=''; toast('CV started'); loadMeasurement(); });
+$('cvForm').addEventListener('submit',async(ev)=>{ ev.preventDefault(); clearLiveCharts(); await getJson('/api/measurement/start',{method:'POST',body:cvParams()}); $('cvForm').dataset.dirty=''; toast('CV started'); loadMeasurement(); });
 $('swvForm').addEventListener('input',()=>{$('swvForm').dataset.dirty='1';});
-$('swvForm').addEventListener('submit',async(ev)=>{ ev.preventDefault(); await getJson('/api/measurement/start',{method:'POST',body:swvParams()}); $('swvForm').dataset.dirty=''; toast('SWV started'); loadMeasurement(); });
+$('swvForm').addEventListener('submit',async(ev)=>{ ev.preventDefault(); clearLiveCharts(); await getJson('/api/measurement/start',{method:'POST',body:swvParams()}); $('swvForm').dataset.dirty=''; toast('SWV started'); loadMeasurement(); });
 $('dpvForm').addEventListener('input',()=>{$('dpvForm').dataset.dirty='1';});
-$('dpvForm').addEventListener('submit',async(ev)=>{ ev.preventDefault(); await getJson('/api/measurement/start',{method:'POST',body:dpvParams()}); $('dpvForm').dataset.dirty=''; toast('DPV started'); loadMeasurement(); });
+$('dpvForm').addEventListener('submit',async(ev)=>{ ev.preventDefault(); clearLiveCharts(); await getJson('/api/measurement/start',{method:'POST',body:dpvParams()}); $('dpvForm').dataset.dirty=''; toast('DPV started'); loadMeasurement(); });
 function selectSsid(ssid){ $('ssid').value=ssid; $('pass').focus(); toast('SSID selected'); }
 $('wifiForm').addEventListener('submit', async (ev)=>{ ev.preventDefault(); const fd=new FormData(ev.target); if(!$('enterprise').checked) fd.delete('enterprise'); try{ const r=await fetch('/api/save',{method:'POST',body:new URLSearchParams(fd)}); const j=await r.json(); toast(j.message||'Saved'); setTimeout(refreshAll,1400); }catch(e){toast('Save error: '+e.message);} });
 function refreshAll(){ loadStatus(); loadNetworks(); loadMeasurement(); loadCvFiles(); }

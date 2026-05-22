@@ -2066,6 +2066,10 @@ static void runSwvMode(uint32_t &sampleIndex) {
   int sign = (swvConfig.endV >= swvConfig.startV) ? 1 : -1;
   SweepDirection direction = (sign > 0) ? DIR_UP : DIR_DOWN;
   uint32_t totalSteps = (uint32_t)floorf(fabsf(swvConfig.endV - swvConfig.startV) / swvConfig.stepV) + 1;
+  if (totalSteps == 0) totalSteps = 1;
+  measurementCycleCurrent = 1;
+  measurementCycleTotal = 1;
+  measurementProgressPermille = 0;
   uint32_t forwardHoldUs = (uint32_t)(swvConfig.dutyMs * 1000.0f);
   uint32_t reverseHoldUs = (uint32_t)((swvConfig.periodMs - swvConfig.dutyMs) * 1000.0f);
   if (forwardHoldUs < 100) forwardHoldUs = 100;
@@ -2115,6 +2119,7 @@ static void runSwvMode(uint32_t &sampleIndex) {
     data.timestamp_us = esp_timer_get_time();
     data.period_us = (uint32_t)(data.timestamp_us - t0);
     publishMeasurement(data);
+    setMeasurementProgress(stepIndex + 1, totalSteps);
 
     vTaskDelay(1);
   }
@@ -2127,6 +2132,8 @@ static void runSwvMode(uint32_t &sampleIndex) {
   setMeasurementPriority(false);
 
   Serial.println(swvCompleted ? "SWV completed" : "SWV stopped before completion");
+  measurementCompleted = swvCompleted;
+  if (swvCompleted) measurementProgressPermille = 1000;
 }
 
 static void runDpvMode(uint32_t &sampleIndex) {
@@ -2193,6 +2200,10 @@ static void runDpvMode(uint32_t &sampleIndex) {
   int sign = (dpvConfig.endV >= dpvConfig.startV) ? 1 : -1;
   SweepDirection direction = (sign > 0) ? DIR_UP : DIR_DOWN;
   uint32_t totalSteps = (uint32_t)floorf(fabsf(dpvConfig.endV - dpvConfig.startV) / dpvConfig.stepV) + 1;
+  if (totalSteps == 0) totalSteps = 1;
+  measurementCycleCurrent = 1;
+  measurementCycleTotal = 1;
+  measurementProgressPermille = 0;
   uint32_t pulseUs = (uint32_t)(dpvConfig.pulseMs * 1000.0f);
   uint32_t baseHoldUs = (uint32_t)((dpvConfig.periodMs - dpvConfig.pulseMs) * 1000.0f);
   if (pulseUs < 100) pulseUs = 100;
@@ -2240,6 +2251,7 @@ static void runDpvMode(uint32_t &sampleIndex) {
     data.timestamp_us = esp_timer_get_time();
     data.period_us = (uint32_t)(data.timestamp_us - t0);
     publishMeasurement(data);
+    setMeasurementProgress(stepIndex + 1, totalSteps);
 
     vTaskDelay(1);
   }
@@ -2252,6 +2264,8 @@ static void runDpvMode(uint32_t &sampleIndex) {
   setMeasurementPriority(false);
 
   Serial.println(dpvCompleted ? "DPV completed" : "DPV stopped before completion");
+  measurementCompleted = dpvCompleted;
+  if (dpvCompleted) measurementProgressPermille = 1000;
 }
 
 // ======================================================
@@ -3097,6 +3111,10 @@ void handleSerialCommand(char c) {
 static const char *WIFI_NVS_NAMESPACE   = "smart_ec";
 static const char *WIFI_NVS_KEY         = "wifi_list_v1";          // WiFi credentials are stored in NVS, not in LittleFS
 static const char *WIFI_PORTAL_FILE     = "/wifi_index.html";      // put this file in PlatformIO data/ and upload LittleFS
+static const char *WIFI_ASSET_DIR       = "/device_assets";        // optional SD card assets served by the web app
+static const char *WIFI_PLOTLY_FILE     = "/device_assets/plotly.min.js";
+static const char *WIFI_PLOTLY_TEMP_FILE = "/device_assets/plotly.tmp";
+static const char *WIFI_PLOTLY_LEGACY_FILE = "/plotly.min.js";
 static const char *WIFI_AP_PASSWORD     = "12345678";
 static const uint8_t WIFI_MAX_CREDS     = 12;
 static const uint8_t WIFI_DEFAULT_ATTEMPTS = 3;
@@ -3120,9 +3138,13 @@ static WifiCredential wifiCreds[WIFI_MAX_CREDS];
 static uint8_t wifiCredCount = 0;
 static WebServer wifiServer(80);
 static DNSServer wifiDns;
+static File wifiAssetUploadFile;
 static bool wifiServerStarted = false;
 static bool wifiApMode = false;
 static bool wifiMdnsStarted = false;
+static bool wifiAssetUploadOk = false;
+static size_t wifiAssetUploadBytes = 0;
+static String wifiAssetUploadMessage;
 static bool wifiConnectRequested = false;
 static bool vibrationTestActive = false;
 static uint32_t wifiLastRetryMs = 0;
@@ -3131,7 +3153,7 @@ static String wifiApSsid = "smart-ec-Setup";
 static String wifiDeviceIdSuffix() {
   uint64_t mac = ESP.getEfuseMac();
   char suffix[7];
-  snprintf(suffix, sizeof(suffix), "%06X", (uint32_t)(mac & 0xFFFFFF));
+  snprintf(suffix, sizeof(suffix), "%06x", (uint32_t)(mac & 0xFFFFFF));
   return String(suffix);
 }
 
@@ -4457,11 +4479,198 @@ static void handleCvDeleteApi() {
 #endif
 }
 
+static void handlePlotlyJs() {
+  wifiServer.sendHeader("Cache-Control", "public, max-age=86400");
+
+#if ENABLE_SD_LOGGING
+  bool sdAvailable = sdMounted;
+  if (!sdAvailable && !measurementEnabled && !measurementBusy && !cvLogActive && !sdLogFileOpen) {
+    sdAvailable = initSdCard();
+  }
+
+  if (sdAvailable && !measurementEnabled && !measurementBusy && !cvLogActive && !sdLogFileOpen && SD_MMC.exists(WIFI_PLOTLY_FILE)) {
+    File f = SD_MMC.open(WIFI_PLOTLY_FILE, FILE_READ);
+    if (f) {
+      if (f.size() > 0) {
+        wifiServer.streamFile(f, "application/javascript");
+        f.close();
+        return;
+      }
+      f.close();
+    }
+  }
+  if (sdAvailable && !measurementEnabled && !measurementBusy && !cvLogActive && !sdLogFileOpen && SD_MMC.exists(WIFI_PLOTLY_LEGACY_FILE)) {
+    File f = SD_MMC.open(WIFI_PLOTLY_LEGACY_FILE, FILE_READ);
+    if (f) {
+      wifiServer.streamFile(f, "application/javascript");
+      f.close();
+      return;
+    }
+  }
+#endif
+
+  if (LittleFS.exists(WIFI_PLOTLY_LEGACY_FILE)) {
+    File f = LittleFS.open(WIFI_PLOTLY_LEGACY_FILE, FILE_READ);
+    if (f) {
+      wifiServer.streamFile(f, "application/javascript");
+      f.close();
+      return;
+    }
+  }
+
+  wifiServer.send(404, "text/plain", "plotly.min.js not found");
+}
+
+static String sdAssetStatusJson() {
+  String json = F("{\"sd_mounted\":");
+  json += sdMounted ? F("true") : F("false");
+  json += F(",\"asset_dir\":\"");
+  json += WIFI_ASSET_DIR;
+  json += F("\",\"plotly_path\":\"");
+  json += WIFI_PLOTLY_FILE;
+  json += F("\",\"plotly_exists\":");
+
+#if ENABLE_SD_LOGGING
+  bool sdAvailable = sdMounted;
+  if (!sdAvailable && !measurementEnabled && !measurementBusy && !cvLogActive && !sdLogFileOpen) {
+    sdAvailable = initSdCard();
+  }
+  bool exists = sdAvailable && SD_MMC.exists(WIFI_PLOTLY_FILE);
+  json += exists ? F("true") : F("false");
+  json += F(",\"plotly_size\":");
+  if (exists) {
+    File f = SD_MMC.open(WIFI_PLOTLY_FILE, FILE_READ);
+    if (f) {
+      json += String((uint32_t)f.size());
+      f.close();
+    } else {
+      json += F("null");
+    }
+  } else {
+    json += F("0");
+  }
+#else
+  json += F("false,\"plotly_size\":0");
+#endif
+
+  json += F("}");
+  return json;
+}
+
+static void handlePlotlyUploadResult() {
+#if ENABLE_SD_LOGGING
+  if (wifiAssetUploadOk) {
+    String json = F("{\"ok\":true,\"message\":\"Uploaded to /device_assets/plotly.min.js\",\"bytes\":");
+    json += String((uint32_t)wifiAssetUploadBytes);
+    json += F("}");
+    wifiServer.send(200, "application/json", json);
+  } else {
+    String json = F("{\"ok\":false,\"message\":\"");
+    json += jsonEscape(wifiAssetUploadMessage.length() ? wifiAssetUploadMessage : String("Upload failed"));
+    json += F("\"}");
+    wifiServer.send(500, "application/json", json);
+  }
+#else
+  wifiServer.send(503, "application/json", F("{\"ok\":false,\"message\":\"SD logging disabled\"}"));
+#endif
+}
+
+static void handlePlotlyUploadStream() {
+#if ENABLE_SD_LOGGING
+  HTTPUpload &upload = wifiServer.upload();
+
+  if (upload.status == UPLOAD_FILE_START) {
+    wifiAssetUploadOk = false;
+    wifiAssetUploadBytes = 0;
+    wifiAssetUploadMessage = "";
+
+    if (measurementEnabled || measurementBusy || cvLogActive || sdLogFileOpen) {
+      wifiAssetUploadMessage = "Stop measurement before uploading SD assets";
+      return;
+    }
+
+    if (!sdMounted && !initSdCard()) {
+      wifiAssetUploadMessage = "SD card is not mounted";
+      return;
+    }
+
+    if (!SD_MMC.exists(WIFI_ASSET_DIR)) {
+      SD_MMC.mkdir(WIFI_ASSET_DIR);
+    }
+
+    if (SD_MMC.exists(WIFI_PLOTLY_TEMP_FILE)) {
+      SD_MMC.remove(WIFI_PLOTLY_TEMP_FILE);
+    }
+
+    wifiAssetUploadFile = SD_MMC.open(WIFI_PLOTLY_TEMP_FILE, FILE_WRITE);
+    if (!wifiAssetUploadFile) {
+      wifiAssetUploadMessage = "Cannot open SD temp file";
+      return;
+    }
+
+    wifiAssetUploadOk = true;
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_WRITE) {
+    if (wifiAssetUploadOk && wifiAssetUploadFile) {
+      size_t written = wifiAssetUploadFile.write(upload.buf, upload.currentSize);
+      wifiAssetUploadBytes += written;
+      if (written != upload.currentSize) {
+        wifiAssetUploadOk = false;
+        wifiAssetUploadMessage = "SD write failed";
+      }
+    }
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_END) {
+    if (wifiAssetUploadFile) {
+      wifiAssetUploadFile.close();
+    }
+
+    if (wifiAssetUploadOk) {
+      if (SD_MMC.exists(WIFI_PLOTLY_FILE)) {
+        SD_MMC.remove(WIFI_PLOTLY_FILE);
+      }
+      if (!SD_MMC.rename(WIFI_PLOTLY_TEMP_FILE, WIFI_PLOTLY_FILE)) {
+        wifiAssetUploadOk = false;
+        wifiAssetUploadMessage = "Cannot move temp file into /device_assets";
+      } else {
+        File check = SD_MMC.open(WIFI_PLOTLY_FILE, FILE_READ);
+        if (!check || check.size() == 0) {
+          wifiAssetUploadOk = false;
+          wifiAssetUploadMessage = "Uploaded file is empty";
+        }
+        if (check) check.close();
+      }
+    }
+
+    if (!wifiAssetUploadOk && SD_MMC.exists(WIFI_PLOTLY_TEMP_FILE)) {
+      SD_MMC.remove(WIFI_PLOTLY_TEMP_FILE);
+    }
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_ABORTED) {
+    if (wifiAssetUploadFile) {
+      wifiAssetUploadFile.close();
+    }
+    if (SD_MMC.exists(WIFI_PLOTLY_TEMP_FILE)) {
+      SD_MMC.remove(WIFI_PLOTLY_TEMP_FILE);
+    }
+    wifiAssetUploadOk = false;
+    wifiAssetUploadMessage = "Upload aborted";
+  }
+#endif
+}
+
 static void startWifiWebServer() {
   if (wifiServerStarted) return;
 
   wifiServer.on("/", HTTP_GET, []() { sendWifiPortalIndex(); });
   wifiServer.on("/wifi_index.html", HTTP_GET, []() { sendWifiPortalIndex(); });
+  wifiServer.on("/plotly.min.js", HTTP_GET, []() { handlePlotlyJs(); });
   wifiServer.on("/generate_204", HTTP_GET, []() { wifiServer.sendHeader("Location", "/", true); wifiServer.send(302, "text/plain", ""); });
   wifiServer.on("/fwlink", HTTP_GET, []() { wifiServer.sendHeader("Location", "/", true); wifiServer.send(302, "text/plain", ""); });
 
@@ -4480,6 +4689,8 @@ static void startWifiWebServer() {
   wifiServer.on("/api/cv/download", HTTP_GET, []() { handleCvDownloadCsvApi(); });
   wifiServer.on("/api/cv/download-bin", HTTP_GET, []() { handleCvDownloadBinApi(); });
   wifiServer.on("/api/cv/delete", HTTP_POST, []() { handleCvDeleteApi(); });
+  wifiServer.on("/api/assets/status", HTTP_GET, []() { wifiServer.send(200, "application/json", sdAssetStatusJson()); });
+  wifiServer.on("/api/assets/upload-plotly", HTTP_POST, []() { handlePlotlyUploadResult(); }, []() { handlePlotlyUploadStream(); });
   wifiServer.on("/api/save", HTTP_POST, []() { handleWifiSave(); });
   wifiServer.on("/api/delete", HTTP_POST, []() { handleWifiDelete(); });
   wifiServer.on("/api/connect", HTTP_POST, []() {
