@@ -9,6 +9,10 @@
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <ESPmDNS.h>
+#include <HTTPClient.h>
+#include <HTTPUpdate.h>
+#include <WiFiClientSecure.h>
+#include <Update.h>
 #include <time.h>
 #include "esp_system.h"
 #if __has_include(<esp_wpa2.h>)
@@ -46,6 +50,9 @@
 #define ENABLE_TOUCH_POLLING     1
 #define ENABLE_I2C_MONITOR_TASK  0
 #define ENABLE_SD_LOGGING        1
+
+static const char *FW_VERSION  = "2.0.0";
+static const char *WEB_VERSION = "2.0.0";
 
 // ======================================================
 // Pin Mapping
@@ -2333,6 +2340,62 @@ void measurementTask(void *pvParameters) {
 }
 
 #if ENABLE_TFT_DISPLAY
+void drawFirmwareVersion() {
+  // Must be called inside an active lcd.startWrite() block.
+  String text = String("FW ") + FW_VERSION;
+  int16_t x = lcd.width() - 8;
+  int16_t y = lcd.height() - 8;
+
+  lcd.setTextDatum(BR_DATUM);
+  lcd.setTextSize(1);
+  lcd.setTextColor(0x7BEF, TFT_BLACK);
+  lcd.fillRect(lcd.width() - 100, lcd.height() - 18, 100, 18, TFT_BLACK);
+  lcd.drawString(text, x, y);
+  lcd.setTextDatum(TL_DATUM);
+}
+
+void drawOtaStatusScreen(const String &title, const String &line1, const String &line2, uint16_t color) {
+  // Must be called while holding spiMutex.
+  deselectAllSPI();
+
+  lcd.setRotation(1);
+  lcd.startWrite();
+  lcd.fillScreen(TFT_BLACK);
+  lcd.setTextDatum(TL_DATUM);
+
+  lcd.setTextSize(2);
+  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  lcd.setCursor(10, 16);
+  lcd.println("smart-ec");
+
+  lcd.setTextColor(color, TFT_BLACK);
+  lcd.setCursor(10, 72);
+  lcd.println(title);
+
+  lcd.setTextSize(1);
+  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  lcd.setCursor(10, 126);
+  lcd.println(line1);
+  lcd.setCursor(10, 146);
+  lcd.println(line2);
+  lcd.setCursor(10, 186);
+  lcd.println("Please keep power connected.");
+
+  drawFirmwareVersion();
+
+  lcd.endWrite();
+  deselectAllSPI();
+}
+
+void showOtaStatusScreen(const String &title, const String &line1, const String &line2, uint16_t color) {
+  if (!takeSPI(1000)) {
+    Serial.println("OTA status screen skipped: spiMutex timeout");
+    return;
+  }
+  drawOtaStatusScreen(title, line1, line2, color);
+  giveSPI();
+}
+
 void printRtcTimeLine(const String &line) {
   lcd.fillRect(10, 230, 260, 12, TFT_BLACK);
   lcd.setCursor(10, 230);
@@ -2393,6 +2456,7 @@ void drawStatusPanel() {
 
   lcd.setCursor(10, 266);
   lcd.println("Use web app for CV/SWV/DPV setup and files.");
+  drawFirmwareVersion();
 
   lcd.endWrite();
   deselectAllSPI();
@@ -2425,6 +2489,7 @@ void drawStaticScreen() {
   lcd.setCursor(10, 88);
   lcd.print("Mode: ");
   lcd.println(measurementModeToText(getMeasurementMode()));
+  drawFirmwareVersion();
 
   lcd.endWrite();
   drawStatusPanel();
@@ -2502,6 +2567,7 @@ void drawMeasurement(const MeasurementData &data) {
   lcd.print("Period: ");
   lcd.print(data.period_us);
   lcd.println(" us");
+  drawFirmwareVersion();
 
   lcd.endWrite();
   deselectAllSPI();
@@ -2556,6 +2622,7 @@ void serviceTftRefresh() {
 }
 #else
 void serviceTftRefresh() {}
+void showOtaStatusScreen(const String&, const String&, const String&, uint16_t) {}
 #endif
 
 // ======================================================
@@ -3111,6 +3178,7 @@ void handleSerialCommand(char c) {
 static const char *WIFI_NVS_NAMESPACE   = "smart_ec";
 static const char *WIFI_NVS_KEY         = "wifi_list_v1";          // WiFi credentials are stored in NVS, not in LittleFS
 static const char *WIFI_PORTAL_FILE     = "/wifi_index.html";      // put this file in PlatformIO data/ and upload LittleFS
+static const char *OTA_WEB_VERSION_KEY  = "web_ver";
 static const char *WIFI_ASSET_DIR       = "/device_assets";        // optional SD card assets served by the web app
 static const char *WIFI_PLOTLY_FILE     = "/device_assets/plotly.min.js";
 static const char *WIFI_PLOTLY_TEMP_FILE = "/device_assets/plotly.tmp";
@@ -3122,6 +3190,10 @@ static const uint32_t WIFI_DEFAULT_TIMEOUT_MS = 6000;
 static const uint32_t WIFI_STORED_TIMEOUT_MS  = 4500;
 static const uint32_t WIFI_RETRY_PERIOD_MS    = 30000;
 static const uint16_t WIFI_SCAN_MS_PER_CH     = 120;  // active scan; all channels about 1.5-2.0s
+
+static const char *VERSION_URL = "https://github.com/tawee11/potenV2/releases/latest/download/version.json";
+static const char *FIRMWARE_URL_FALLBACK = "https://github.com/tawee11/potenV2/releases/latest/download/firmware.bin";
+static const char *FILESYSTEM_URL_FALLBACK = "https://github.com/tawee11/potenV2/releases/latest/download/littlefs.bin";
 
 struct WifiCredential {
   String ssid;
@@ -3139,6 +3211,7 @@ static uint8_t wifiCredCount = 0;
 static WebServer wifiServer(80);
 static DNSServer wifiDns;
 static File wifiAssetUploadFile;
+static String installedWebVersion = WEB_VERSION;
 static bool wifiServerStarted = false;
 static bool wifiApMode = false;
 static bool wifiMdnsStarted = false;
@@ -3265,6 +3338,264 @@ static String jsonEscape(const String &s) {
     else out += c;
   }
   return out;
+}
+
+static String cleanVersion(String v) {
+  v.trim();
+  if (v.startsWith("v") || v.startsWith("V")) v.remove(0, 1);
+  return v;
+}
+
+static int versionPart(String v, int index) {
+  v = cleanVersion(v);
+  int start = 0;
+  for (int i = 0; i < index; i++) {
+    int dot = v.indexOf('.', start);
+    if (dot < 0) return 0;
+    start = dot + 1;
+  }
+  int end = v.indexOf('.', start);
+  if (end < 0) end = v.length();
+  return v.substring(start, end).toInt();
+}
+
+static bool isNewVersion(String latest, String current) {
+  latest = cleanVersion(latest);
+  current = cleanVersion(current);
+  for (int i = 0; i < 3; i++) {
+    int l = versionPart(latest, i);
+    int c = versionPart(current, i);
+    if (l > c) return true;
+    if (l < c) return false;
+  }
+  return false;
+}
+
+static String jsonStringValue(const String &json, const char *key, const String &fallback = String()) {
+  String pattern = String("\"") + key + "\"";
+  int pos = json.indexOf(pattern);
+  if (pos < 0) return fallback;
+  pos = json.indexOf(':', pos + pattern.length());
+  if (pos < 0) return fallback;
+  pos++;
+  while (pos < (int)json.length() && isspace((unsigned char)json[pos])) pos++;
+  if (pos >= (int)json.length() || json[pos] != '"') return fallback;
+  pos++;
+
+  String value;
+  bool escaped = false;
+  for (; pos < (int)json.length(); pos++) {
+    char c = json[pos];
+    if (escaped) {
+      if (c == 'n') value += '\n';
+      else if (c == 'r') value += '\r';
+      else if (c == 't') value += '\t';
+      else value += c;
+      escaped = false;
+    } else if (c == '\\') {
+      escaped = true;
+    } else if (c == '"') {
+      return value;
+    } else {
+      value += c;
+    }
+  }
+  return fallback;
+}
+
+struct ReleaseInfo {
+  bool ok = false;
+  String firmwareVersion;
+  String webVersion;
+  String firmwareUrl;
+  String filesystemUrl;
+  String error;
+};
+
+static void loadInstalledWebVersion() {
+  Preferences prefs;
+  if (!prefs.begin(WIFI_NVS_NAMESPACE, true)) {
+    installedWebVersion = WEB_VERSION;
+    return;
+  }
+  installedWebVersion = prefs.getString(OTA_WEB_VERSION_KEY, WEB_VERSION);
+  prefs.end();
+}
+
+static bool saveInstalledWebVersion(const String &version) {
+  Preferences prefs;
+  if (!prefs.begin(WIFI_NVS_NAMESPACE, false)) {
+    Serial.println("OTA web version save failed: NVS open failed.");
+    return false;
+  }
+  prefs.putString(OTA_WEB_VERSION_KEY, version);
+  prefs.end();
+  installedWebVersion = version;
+  return true;
+}
+
+static ReleaseInfo fetchReleaseInfo() {
+  ReleaseInfo info;
+
+  if (WiFi.status() != WL_CONNECTED) {
+    info.error = "WiFi is not connected";
+    return info;
+  }
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient https;
+  https.setTimeout(15000);
+  https.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+
+  Serial.println("Checking GitHub release version...");
+  Serial.print("Version URL: ");
+  Serial.println(VERSION_URL);
+
+  if (!https.begin(client, VERSION_URL)) {
+    info.error = "HTTPS begin failed";
+    return info;
+  }
+
+  int httpCode = https.GET();
+  if (httpCode != HTTP_CODE_OK) {
+    info.error = "HTTP code " + String(httpCode);
+    https.end();
+    return info;
+  }
+
+  String payload = https.getString();
+  https.end();
+
+  info.firmwareVersion = jsonStringValue(payload, "firmware_version");
+  if (info.firmwareVersion.isEmpty()) {
+    info.firmwareVersion = jsonStringValue(payload, "version");
+  }
+  info.webVersion = jsonStringValue(payload, "web_version", WEB_VERSION);
+  info.firmwareUrl = jsonStringValue(payload, "firmware", FIRMWARE_URL_FALLBACK);
+  info.filesystemUrl = jsonStringValue(payload, "filesystem", FILESYSTEM_URL_FALLBACK);
+
+  info.firmwareVersion.trim();
+  info.webVersion.trim();
+  info.firmwareUrl.trim();
+  info.filesystemUrl.trim();
+
+  if (info.firmwareVersion.isEmpty()) {
+    info.error = "firmware_version is empty";
+    return info;
+  }
+
+  info.ok = true;
+  return info;
+}
+
+static String otaVersionJson(const ReleaseInfo &info) {
+  bool firmwareUpdate = info.ok && isNewVersion(info.firmwareVersion, FW_VERSION);
+  bool webUpdate = info.ok && isNewVersion(info.webVersion, installedWebVersion);
+
+  String json = F("{\"ok\":");
+  json += info.ok ? F("true") : F("false");
+  if (!info.ok) {
+    json += F(",\"message\":\"");
+    json += jsonEscape(info.error);
+    json += F("\"}");
+    return json;
+  }
+  json += F(",\"current_firmware\":\"");
+  json += jsonEscape(FW_VERSION);
+  json += F("\",\"latest_firmware\":\"");
+  json += jsonEscape(info.firmwareVersion);
+  json += F("\",\"firmware_update_available\":");
+  json += firmwareUpdate ? F("true") : F("false");
+  json += F(",\"current_web\":\"");
+  json += jsonEscape(installedWebVersion);
+  json += F("\",\"latest_web\":\"");
+  json += jsonEscape(info.webVersion);
+  json += F("\",\"web_update_available\":");
+  json += webUpdate ? F("true") : F("false");
+  json += F(",\"firmware_url\":\"");
+  json += jsonEscape(info.firmwareUrl);
+  json += F("\",\"filesystem_url\":\"");
+  json += jsonEscape(info.filesystemUrl);
+  json += F("\"}");
+  return json;
+}
+
+static bool updateLittleFSFromURL(const String &url, const String &newWebVersion) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("LittleFS OTA skipped: WiFi is not connected.");
+    return false;
+  }
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient https;
+  https.setTimeout(30000);
+  https.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+
+  Serial.println("Starting LittleFS OTA...");
+  Serial.print("LittleFS URL: ");
+  Serial.println(url);
+
+  if (!https.begin(client, url)) {
+    Serial.println("LittleFS OTA HTTPS begin failed.");
+    return false;
+  }
+
+  int httpCode = https.GET();
+  if (httpCode != HTTP_CODE_OK) {
+    Serial.print("LittleFS OTA HTTP error: ");
+    Serial.println(httpCode);
+    https.end();
+    return false;
+  }
+
+  int contentLength = https.getSize();
+  if (contentLength <= 0) {
+    Serial.println("LittleFS OTA invalid content length.");
+    https.end();
+    return false;
+  }
+
+  WiFiClient *stream = https.getStreamPtr();
+  LittleFS.end();
+
+  if (!Update.begin(contentLength, U_SPIFFS)) {
+    Serial.println("LittleFS OTA Update.begin failed.");
+    Update.printError(Serial);
+    https.end();
+    LittleFS.begin(false);
+    return false;
+  }
+
+  size_t written = Update.writeStream(*stream);
+  Serial.print("LittleFS OTA written: ");
+  Serial.print(written);
+  Serial.print("/");
+  Serial.println(contentLength);
+
+  if (written != (size_t)contentLength) {
+    Serial.println("LittleFS OTA written size mismatch.");
+    Update.abort();
+    https.end();
+    LittleFS.begin(false);
+    return false;
+  }
+
+  if (!Update.end() || !Update.isFinished()) {
+    Serial.println("LittleFS OTA finish failed.");
+    Update.printError(Serial);
+    https.end();
+    LittleFS.begin(false);
+    return false;
+  }
+
+  https.end();
+  saveInstalledWebVersion(newWebVersion);
+  Serial.println("LittleFS OTA success.");
+  return true;
 }
 
 static String serializeWifiCredentials() {
@@ -3666,6 +3997,10 @@ static String wifiStatusJson() {
   json += jsonEscape(WIFI_NVS_KEY);
   json += F("\",\"portal_file\":\"");
   json += jsonEscape(WIFI_PORTAL_FILE);
+  json += F("\",\"firmware_version\":\"");
+  json += jsonEscape(FW_VERSION);
+  json += F("\",\"web_version\":\"");
+  json += jsonEscape(installedWebVersion);
   json += F("\",\"saved_count\":");
   json += String(wifiCredCount);
   json += F(",\"measurement_running\":");
@@ -4665,6 +5000,167 @@ static void handlePlotlyUploadStream() {
 #endif
 }
 
+static bool otaBusyBlocked() {
+  return measurementEnabled || measurementBusy || cvLogActive || sdLogFileOpen;
+}
+
+static void handleOtaVersionApi() {
+  ReleaseInfo info = fetchReleaseInfo();
+  wifiServer.send(info.ok ? 200 : 500, "application/json", otaVersionJson(info));
+}
+
+static void handleOtaFirmwareApi() {
+  if (otaBusyBlocked()) {
+    showOtaStatusScreen("Firmware OTA", "Measurement is running.", "Stop measurement before update.", TFT_RED);
+    wifiServer.send(409, "application/json", F("{\"ok\":false,\"message\":\"Stop measurement before OTA update\"}"));
+    return;
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    showOtaStatusScreen("Firmware OTA", "WiFi is not connected.", "Connect WiFi before update.", TFT_RED);
+    wifiServer.send(400, "application/json", F("{\"ok\":false,\"message\":\"WiFi is not connected\"}"));
+    return;
+  }
+
+  showOtaStatusScreen("Firmware OTA", "Checking GitHub Release...", String("Current FW ") + FW_VERSION, TFT_CYAN);
+  ReleaseInfo info = fetchReleaseInfo();
+  if (!info.ok) {
+    showOtaStatusScreen("Firmware OTA", "Version check failed.", info.error, TFT_RED);
+    String json = F("{\"ok\":false,\"message\":\"");
+    json += jsonEscape(info.error);
+    json += F("\"}");
+    wifiServer.send(500, "application/json", json);
+    return;
+  }
+
+  if (!isNewVersion(info.firmwareVersion, FW_VERSION)) {
+    showOtaStatusScreen("Firmware OTA", "Firmware is already current.", String("FW ") + FW_VERSION, TFT_GREEN);
+    String json = F("{\"ok\":true,\"message\":\"Firmware is already current\",\"current_firmware\":\"");
+    json += jsonEscape(FW_VERSION);
+    json += F("\",\"latest_firmware\":\"");
+    json += jsonEscape(info.firmwareVersion);
+    json += F("\"}");
+    wifiServer.send(200, "application/json", json);
+    return;
+  }
+
+  String json = F("{\"ok\":true,\"message\":\"Starting firmware OTA. Device will restart if update succeeds.\",\"latest_firmware\":\"");
+  json += jsonEscape(info.firmwareVersion);
+  json += F("\"}");
+  wifiServer.send(200, "application/json", json);
+  delay(700);
+
+  showOtaStatusScreen("Firmware OTA", String("Downloading FW ") + info.firmwareVersion, "Device will restart if successful.", TFT_YELLOW);
+  Serial.println("Starting firmware OTA...");
+  Serial.print("Firmware URL: ");
+  Serial.println(info.firmwareUrl);
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  httpUpdate.rebootOnUpdate(true);
+
+  t_httpUpdate_return ret = httpUpdate.update(client, info.firmwareUrl);
+  switch (ret) {
+    case HTTP_UPDATE_FAILED:
+      showOtaStatusScreen("Firmware OTA", "Update failed.", httpUpdate.getLastErrorString(), TFT_RED);
+      Serial.printf("Firmware OTA failed. Error (%d): %s\n",
+                    httpUpdate.getLastError(),
+                    httpUpdate.getLastErrorString().c_str());
+      break;
+    case HTTP_UPDATE_NO_UPDATES:
+      showOtaStatusScreen("Firmware OTA", "No update available.", String("FW ") + FW_VERSION, TFT_GREEN);
+      Serial.println("Firmware OTA: no updates.");
+      break;
+    case HTTP_UPDATE_OK:
+      showOtaStatusScreen("Firmware OTA", "Update complete.", "Restarting...", TFT_GREEN);
+      Serial.println("Firmware OTA OK. Rebooting...");
+      break;
+  }
+}
+
+static void handleOtaWebApi() {
+  if (otaBusyBlocked()) {
+    wifiServer.send(409, "application/json", F("{\"ok\":false,\"message\":\"Stop measurement before web OTA update\"}"));
+    return;
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    wifiServer.send(400, "application/json", F("{\"ok\":false,\"message\":\"WiFi is not connected\"}"));
+    return;
+  }
+
+  ReleaseInfo info = fetchReleaseInfo();
+  if (!info.ok) {
+    String json = F("{\"ok\":false,\"message\":\"");
+    json += jsonEscape(info.error);
+    json += F("\"}");
+    wifiServer.send(500, "application/json", json);
+    return;
+  }
+
+  if (!isNewVersion(info.webVersion, installedWebVersion)) {
+    String json = F("{\"ok\":true,\"message\":\"Web app is already current\",\"current_web\":\"");
+    json += jsonEscape(installedWebVersion);
+    json += F("\",\"latest_web\":\"");
+    json += jsonEscape(info.webVersion);
+    json += F("\"}");
+    wifiServer.send(200, "application/json", json);
+    return;
+  }
+
+  wifiServer.send(200, "application/json", F("{\"ok\":true,\"message\":\"Starting web app OTA. Device will restart if update succeeds.\"}"));
+  delay(700);
+
+  bool ok = updateLittleFSFromURL(info.filesystemUrl, info.webVersion);
+  if (ok) {
+    delay(1000);
+    ESP.restart();
+  }
+
+  Serial.println("Web app OTA failed.");
+}
+
+static void handleOtaAllApi() {
+  if (otaBusyBlocked()) {
+    wifiServer.send(409, "application/json", F("{\"ok\":false,\"message\":\"Stop measurement before OTA update\"}"));
+    return;
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    wifiServer.send(400, "application/json", F("{\"ok\":false,\"message\":\"WiFi is not connected\"}"));
+    return;
+  }
+
+  ReleaseInfo info = fetchReleaseInfo();
+  if (!info.ok) {
+    String json = F("{\"ok\":false,\"message\":\"");
+    json += jsonEscape(info.error);
+    json += F("\"}");
+    wifiServer.send(500, "application/json", json);
+    return;
+  }
+
+  bool firmwareUpdate = isNewVersion(info.firmwareVersion, FW_VERSION);
+  bool webUpdate = isNewVersion(info.webVersion, installedWebVersion);
+  if (!firmwareUpdate && !webUpdate) {
+    wifiServer.send(200, "application/json", F("{\"ok\":true,\"message\":\"Firmware and web app are already current\"}"));
+    return;
+  }
+
+  if (webUpdate) {
+    wifiServer.send(200, "application/json", F("{\"ok\":true,\"message\":\"Starting web app OTA first. After restart, check version again for firmware.\"}"));
+    delay(700);
+    bool ok = updateLittleFSFromURL(info.filesystemUrl, info.webVersion);
+    if (ok) {
+      delay(1000);
+      ESP.restart();
+    }
+    Serial.println("Web app OTA failed during update-all.");
+    return;
+  }
+
+  handleOtaFirmwareApi();
+}
+
 static void startWifiWebServer() {
   if (wifiServerStarted) return;
 
@@ -4691,6 +5187,10 @@ static void startWifiWebServer() {
   wifiServer.on("/api/cv/delete", HTTP_POST, []() { handleCvDeleteApi(); });
   wifiServer.on("/api/assets/status", HTTP_GET, []() { wifiServer.send(200, "application/json", sdAssetStatusJson()); });
   wifiServer.on("/api/assets/upload-plotly", HTTP_POST, []() { handlePlotlyUploadResult(); }, []() { handlePlotlyUploadStream(); });
+  wifiServer.on("/api/ota/version", HTTP_GET, []() { handleOtaVersionApi(); });
+  wifiServer.on("/api/ota/firmware", HTTP_POST, []() { handleOtaFirmwareApi(); });
+  wifiServer.on("/api/ota/web", HTTP_POST, []() { handleOtaWebApi(); });
+  wifiServer.on("/api/ota/all", HTTP_POST, []() { handleOtaAllApi(); });
   wifiServer.on("/api/save", HTTP_POST, []() { handleWifiSave(); });
   wifiServer.on("/api/delete", HTTP_POST, []() { handleWifiDelete(); });
   wifiServer.on("/api/connect", HTTP_POST, []() {
@@ -4844,6 +5344,7 @@ static void requestTftPeriodicIdleRefresh() {
 
 static void wifiManagerBeginFromOptionTask() {
   Serial.println("WiFi manager: default first, then fast-scan NVS credentials, then AP portal.");
+  loadInstalledWebVersion();
   if (connectDefaultWifiFirst()) {
     startWifiWebServer();
     return;

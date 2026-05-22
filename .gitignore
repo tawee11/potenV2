@@ -8,3 +8,4 @@ src/secrets.h
 backup/
 Release/
 results/
+tools/GitReleaseOTA/
