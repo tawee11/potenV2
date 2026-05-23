@@ -140,6 +140,12 @@ static const uint16_t CV_SERIAL_LOG_EVERY = 200;
 static const float POTENTIAL_ZERO_V = ADC_VREF * 0.5f; // E=0V maps to DAC/RE 2.048V
 static const float CV_MIN_POTENTIAL_V = -POTENTIAL_ZERO_V;
 static const float CV_MAX_POTENTIAL_V = DAC_VREF - POTENTIAL_ZERO_V;
+static const float CONTACT_PRECHECK_PULSE_V = 0.020f;
+static const uint32_t CONTACT_PRECHECK_HOLD_MS = 250;
+static const uint8_t CONTACT_PRECHECK_ADC_SAMPLES = 8;
+static const float CONTACT_PRECHECK_RAIL_MARGIN_V = 0.100f;
+static const float CONTACT_PRECHECK_MIN_RESPONSE_V = 0.002f;
+static const float CONTACT_PRECHECK_MIN_CURRENT_A = 50.0e-9f;
 
 // ======================================================
 // Auto-range policy for LMP91000 TIA
@@ -4137,6 +4143,119 @@ static String latestMeasurementJson() {
   return json;
 }
 
+struct ContactPrecheckPoint {
+  float potentialV;
+  float dacV;
+  uint16_t adcRaw;
+  float adcV;
+  float currentA;
+};
+
+static ContactPrecheckPoint readContactPrecheckPoint(float potentialV) {
+  ContactPrecheckPoint point;
+  point.potentialV = clampFloat(potentialV, CV_MIN_POTENTIAL_V, CV_MAX_POTENTIAL_V);
+  point.dacV = potentialToDacVoltage(point.potentialV);
+  point.adcRaw = 0;
+  point.adcV = 0.0f;
+  point.currentA = 0.0f;
+
+  writeAD5680_safe(voltageToDACCode(point.dacV));
+  vTaskDelay(pdMS_TO_TICKS(CONTACT_PRECHECK_HOLD_MS));
+
+  point.adcRaw = readAD7694Average_safe(CONTACT_PRECHECK_ADC_SAMPLES);
+  point.adcV = adcRawToVoltage(point.adcRaw);
+  point.currentA = (point.adcV - ADC_ZERO_VOLTAGE) / getCurrentRtiaOhm();
+  return point;
+}
+
+static bool contactPrecheckPointNearRail(const ContactPrecheckPoint &point) {
+  return point.adcV < CONTACT_PRECHECK_RAIL_MARGIN_V ||
+         point.adcV > (ADC_VREF - CONTACT_PRECHECK_RAIL_MARGIN_V);
+}
+
+static void appendContactPrecheckPointJson(String &json, const ContactPrecheckPoint &point) {
+  json += F("{\"e_v\":");
+  json += String(point.potentialV, 3);
+  json += F(",\"dac_v\":");
+  json += String(point.dacV, 3);
+  json += F(",\"adc_raw\":");
+  json += String(point.adcRaw);
+  json += F(",\"adc_v\":");
+  json += String(point.adcV, 6);
+  json += F(",\"current_a\":");
+  json += String(point.currentA, 12);
+  json += F("}");
+}
+
+static String runContactPrecheckJson() {
+  uint32_t startedMs = millis();
+  measurementBusy = true;
+
+  int8_t savedRangeIndex = currentTiaRangeIndex;
+  autoRangeLowCount = 0;
+  autoRangeHighCount = 0;
+  setTiaRangeIndex_safe(4); // 35k gives a stable, repeatable contact check range.
+
+  ContactPrecheckPoint zero = readContactPrecheckPoint(0.0f);
+  ContactPrecheckPoint positive = readContactPrecheckPoint(CONTACT_PRECHECK_PULSE_V);
+  ContactPrecheckPoint negative = readContactPrecheckPoint(-CONTACT_PRECHECK_PULSE_V);
+  float precheckRtiaOhm = getCurrentRtiaOhm();
+  uint8_t precheckTiaCN = getCurrentTIACN();
+
+  float responseAdcV = fabsf(positive.adcV - negative.adcV);
+  float responseCurrentA = fabsf(positive.currentA - negative.currentA);
+  float maxAbsCurrentA = fmaxf(fabsf(zero.currentA), fmaxf(fabsf(positive.currentA), fabsf(negative.currentA)));
+  bool rail = contactPrecheckPointNearRail(zero) ||
+              contactPrecheckPointNearRail(positive) ||
+              contactPrecheckPointNearRail(negative);
+  bool weak = responseAdcV < CONTACT_PRECHECK_MIN_RESPONSE_V &&
+              maxAbsCurrentA < CONTACT_PRECHECK_MIN_CURRENT_A;
+  bool contactOk = !rail && !weak;
+
+  const char *status = contactOk ? "OK" : "WARN";
+  const char *message = contactOk ? "Contact response detected" :
+      (rail ? "ADC is near rail; check electrode contact, range, or wiring" :
+              "Weak or no response; check WE/RE/CE contact and solution conductivity");
+
+  writeAD5680_safe(voltageToDACCode(potentialToDacVoltage(0.0f)));
+  if (savedRangeIndex >= 0 && savedRangeIndex < TIA_RANGE_COUNT && savedRangeIndex != currentTiaRangeIndex) {
+    setTiaRangeIndex_safe(savedRangeIndex);
+  }
+  measurementBusy = false;
+
+  String json = F("{\"ok\":true,\"contact_ok\":");
+  json += contactOk ? F("true") : F("false");
+  json += F(",\"status\":\"");
+  json += status;
+  json += F("\",\"message\":\"");
+  json += jsonEscape(String(message));
+  json += F("\",\"pulse_v\":");
+  json += String(CONTACT_PRECHECK_PULSE_V, 3);
+  json += F(",\"hold_ms\":");
+  json += String(CONTACT_PRECHECK_HOLD_MS);
+  json += F(",\"duration_ms\":");
+  json += String(millis() - startedMs);
+  json += F(",\"response_adc_v\":");
+  json += String(responseAdcV, 6);
+  json += F(",\"response_current_a\":");
+  json += String(responseCurrentA, 12);
+  json += F(",\"max_abs_current_a\":");
+  json += String(maxAbsCurrentA, 12);
+  json += F(",\"rtia_ohm\":");
+  json += String(precheckRtiaOhm, 0);
+  json += F(",\"tia_cn\":\"0x");
+  if (precheckTiaCN < 0x10) json += '0';
+  json += String(precheckTiaCN, HEX);
+  json += F("\",\"zero\":");
+  appendContactPrecheckPointJson(json, zero);
+  json += F(",\"positive\":");
+  appendContactPrecheckPointJson(json, positive);
+  json += F(",\"negative\":");
+  appendContactPrecheckPointJson(json, negative);
+  json += F("}");
+  return json;
+}
+
 static String cvConfigJson() {
   CvConfig cfg = cvConfig;
   String json = F("{\"experiment_name\":\"");
@@ -4575,6 +4694,15 @@ static void handleMeasurementStopApi() {
   digitalWrite(LED_BUILTIN_PIN, HIGH);
   refreshRunButtonFromOptionTask();
   wifiServer.send(200, "application/json", measurementStatusJson());
+}
+
+static void handleContactPrecheckApi() {
+  if (measurementEnabled || measurementBusy || cvLogActive || sdLogFileOpen) {
+    wifiServer.send(409, "application/json", F("{\"ok\":false,\"message\":\"Stop measurement before contact pre-check\"}"));
+    return;
+  }
+
+  wifiServer.send(200, "application/json", runContactPrecheckJson());
 }
 
 static void handleVibrationTestApi() {
@@ -5180,6 +5308,7 @@ static void startWifiWebServer() {
   wifiServer.on("/api/measurement/dpv", HTTP_POST, []() { handleDpvConfigApi(); });
   wifiServer.on("/api/measurement/start", HTTP_POST, []() { handleMeasurementStartApi(); });
   wifiServer.on("/api/measurement/stop", HTTP_POST, []() { handleMeasurementStopApi(); });
+  wifiServer.on("/api/measurement/precheck", HTTP_POST, []() { handleContactPrecheckApi(); });
   wifiServer.on("/api/measurement/vibration-test", HTTP_POST, []() { handleVibrationTestApi(); });
   wifiServer.on("/api/cv/files", HTTP_GET, []() { handleCvFilesApi(); });
   wifiServer.on("/api/cv/download", HTTP_GET, []() { handleCvDownloadCsvApi(); });
