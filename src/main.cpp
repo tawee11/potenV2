@@ -4928,9 +4928,11 @@ static void handleCvDownloadCsvApi() {
   wifiServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
   wifiServer.send(200, "text/csv", "");
 
+  String modeName = F("CV");
   if (memcmp(header.magic, "POTDPV1", 7) == 0) {
-    wifiServer.sendContent(F("experiment_name,start_v,end_v,step_v,amplitude_v,period_ms,pulse_ms,quiet_ms\n"));
-    wifiServer.sendContent(String(header.experimentName) + "," +
+    modeName = F("DPV");
+    wifiServer.sendContent(F("mode,experiment_name,start_v,end_v,step_v,amplitude_v,period_ms,pulse_ms,quiet_ms\n"));
+    wifiServer.sendContent(modeName + "," + String(header.experimentName) + "," +
                            String(header.startV, 6) + "," +
                            String(header.vertex1V, 6) + "," +
                            String(header.stepV, 6) + "," +
@@ -4939,10 +4941,11 @@ static void handleCvDownloadCsvApi() {
                            String(header.finalV, 6) + "," +
                            String(header.quietMs) + "\n\n");
   } else if (memcmp(header.magic, "POTSWV1", 7) == 0) {
+    modeName = F("SWV");
     float periodMs = 1000.0f / header.scanRateVps;
     float dutyMs = periodMs * header.finalV * 0.01f;
-    wifiServer.sendContent(F("experiment_name,start_v,end_v,step_v,amplitude_v,frequency_hz,period_ms,duty_ms,duty_percent,quiet_ms\n"));
-    wifiServer.sendContent(String(header.experimentName) + "," +
+    wifiServer.sendContent(F("mode,experiment_name,start_v,end_v,step_v,amplitude_v,frequency_hz,period_ms,duty_ms,duty_percent,quiet_ms\n"));
+    wifiServer.sendContent(modeName + "," + String(header.experimentName) + "," +
                            String(header.startV, 6) + "," +
                            String(header.vertex1V, 6) + "," +
                            String(header.stepV, 6) + "," +
@@ -4953,8 +4956,8 @@ static void handleCvDownloadCsvApi() {
                            String(header.finalV, 6) + "," +
                            String(header.quietMs) + "\n\n");
   } else {
-    wifiServer.sendContent(F("experiment_name,start_v,vertex1_v,vertex2_v,final_v,step_v,scan_rate_vps,cycles,quiet_ms\n"));
-    wifiServer.sendContent(String(header.experimentName) + "," +
+    wifiServer.sendContent(F("mode,experiment_name,start_v,vertex1_v,vertex2_v,final_v,step_v,scan_rate_vps,cycles,quiet_ms\n"));
+    wifiServer.sendContent(modeName + "," + String(header.experimentName) + "," +
                            String(header.startV, 6) + "," +
                            String(header.vertex1V, 6) + "," + String(header.vertex2V, 6) + "," +
                            String(header.finalV, 6) + "," + String(header.stepV, 6) + "," +
@@ -4965,13 +4968,23 @@ static void handleCvDownloadCsvApi() {
 
   CvBinRecord record;
   char line[128];
+  bool firstRecord = true;
+  uint64_t firstTimestampUs = 0;
+  uint32_t outputSampleIndex = 0;
   while (file.read((uint8_t *)&record, sizeof(record)) == sizeof(record)) {
+    if (firstRecord) {
+      firstRecord = false;
+      firstTimestampUs = record.timestampUs;
+      outputSampleIndex = 0;
+    }
+    uint64_t elapsedUs64 = (record.timestampUs >= firstTimestampUs) ? (record.timestampUs - firstTimestampUs) : 0ULL;
+    uint32_t elapsedUs = (elapsedUs64 > 0xFFFFFFFFULL) ? 0xFFFFFFFFUL : (uint32_t)elapsedUs64;
     snprintf(
       line,
       sizeof(line),
       "%lu,%lu,%.6f,%.6f\n",
-      (unsigned long)record.sampleIndex,
-      (unsigned long)record.periodUs,
+      (unsigned long)outputSampleIndex++,
+      (unsigned long)elapsedUs,
       record.potentialV,
       record.currentA * 1000000.0f
     );

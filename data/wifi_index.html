@@ -718,7 +718,9 @@ function cvBinToCompactCsv(buffer){
   const recordSize=view.getUint32(12,true);
   const magic=readCString(view,0,8);
   if((magic!=='POTCVB1' && magic!=='POTSWV1' && magic!=='POTDPV1') || headerSize!==104 || recordSize!==56) throw new Error('Invalid measurement binary format');
+  const modeName=magic==='POTDPV1'?'DPV':(magic==='POTSWV1'?'SWV':'CV');
   const header=magic==='POTDPV1' ? [
+    ['mode',modeName],
     ['experiment_name',readCString(view,68,32)],
     ['start_v',view.getFloat32(36,true)],
     ['end_v',view.getFloat32(40,true)],
@@ -728,6 +730,7 @@ function cvBinToCompactCsv(buffer){
     ['pulse_ms',view.getFloat32(48,true)],
     ['quiet_ms',view.getUint32(64,true)]
   ] : magic==='POTSWV1' ? [
+    ['mode',modeName],
     ['experiment_name',readCString(view,68,32)],
     ['start_v',view.getFloat32(36,true)],
     ['end_v',view.getFloat32(40,true)],
@@ -739,6 +742,7 @@ function cvBinToCompactCsv(buffer){
     ['duty_percent',view.getFloat32(48,true)],
     ['quiet_ms',view.getUint32(64,true)]
   ] : [
+    ['mode',modeName],
     ['experiment_name',readCString(view,68,32)],
     ['start_v',view.getFloat32(36,true)],
     ['vertex1_v',view.getFloat32(40,true)],
@@ -754,10 +758,15 @@ function cvBinToCompactCsv(buffer){
   lines.push(header.map(x=>csvEscape(x[1])).join(','));
   lines.push('');
   lines.push('sample_index,period_us,potential_v,current_uA');
+  let firstTimestampUs=null;
+  let outputSampleIndex=0;
   for(let off=headerSize; off+recordSize<=buffer.byteLength; off+=recordSize){
+    const timestampUs=Number(getU64(view,off+8));
+    if(firstTimestampUs===null) firstTimestampUs=Number.isFinite(timestampUs)?timestampUs:0;
+    const elapsedUs=Number.isFinite(timestampUs)?Math.max(0,Math.round(timestampUs-firstTimestampUs)):0;
     const row=[
-      view.getUint32(off,true),
-      view.getUint32(off+16,true),
+      outputSampleIndex++,
+      elapsedUs,
       view.getFloat32(off+20,true).toFixed(6),
       (view.getFloat32(off+48,true)*1000000).toFixed(6)
     ];
