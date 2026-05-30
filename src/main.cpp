@@ -361,6 +361,7 @@ static const UBaseType_t MEAS_PRIORITY_IDLE = 1;
 static const UBaseType_t MEAS_PRIORITY_RUN  = 5;
 static const UBaseType_t OPTION_PRIORITY    = 2;
 static void resetMeasurementProgress(uint16_t totalCycles);
+static void showTftRunStatusImmediate();
 
 static QueueHandle_t loggerQueue = nullptr;
 static QueueHandle_t sdRecordQueue = nullptr;
@@ -388,6 +389,15 @@ volatile uint16_t measurementProgressPermille = 0;
 static bool serialCsvHeaderPrinted = false;
 static bool serialDebugModeLastReported = false;
 static uint32_t lastSerialInputMs = 0;
+
+enum TftRunStatus : uint8_t {
+  TFT_RUN_READY = 0,
+  TFT_RUN_STARTING,
+  TFT_RUN_COMPLETED,
+  TFT_RUN_STOPPED
+};
+
+volatile TftRunStatus tftRunStatus = TFT_RUN_READY;
 
 static bool serialConnectionPresent() {
 #if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
@@ -432,9 +442,12 @@ void setMeasurementPriority(bool high) {
 void requestMeasurementRun() {
   // Wake MeasurementTask only when it is intentionally requested.
   // When idle, MeasurementTask is blocked in ulTaskNotifyTake() and uses no CPU time.
+  tftRunStatus = TFT_RUN_STARTING;
+  showTftRunStatusImmediate();
+
   measurementStopRequested = false;
-  measurementEnabled = true;
   resetMeasurementProgress(0);
+  measurementEnabled = true;
 
   setMeasurementPriority(true);
 
@@ -446,6 +459,7 @@ void requestMeasurementRun() {
 void requestMeasurementStop() {
   // Do not forcibly suspend the task. Let it leave the measurement loop
   // at a safe point after the current ADC/DAC transaction.
+  tftRunStatus = TFT_RUN_STOPPED;
   measurementStopRequested = true;
   measurementEnabled = false;
 
@@ -2341,6 +2355,7 @@ void measurementTask(void *pvParameters) {
     measurementEnabled = false;
     measurementStopRequested = true;
     setMeasurementPriority(false);
+    tftRunStatus = measurementCompleted ? TFT_RUN_COMPLETED : TFT_RUN_STOPPED;
     requestTftFullRefresh();
 
     Serial.println("Measurement stopped, task blocked until next RUN");
@@ -2348,6 +2363,111 @@ void measurementTask(void *pvParameters) {
 }
 
 #if ENABLE_TFT_DISPLAY
+static const uint16_t TFT_BG        = 0x0841;
+static const uint16_t TFT_SURFACE   = 0x1082;
+static const uint16_t TFT_SURFACE_2 = 0x18E3;
+static const uint16_t TFT_LINE      = 0x39E7;
+static const uint16_t TFT_MUTED     = 0x9CD3;
+static const uint16_t TFT_TEXT      = 0xFFFF;
+static const uint16_t TFT_ACCENT    = 0x0579;
+static const uint16_t TFT_ACCENT_2  = 0x5D9F;
+static const uint16_t TFT_OK_COLOR  = 0x07E0;
+static const uint16_t TFT_WARN_COLOR = 0xFD20;
+
+static String tftFitText(String text, uint8_t maxChars) {
+  if (text.length() <= maxChars) return text;
+  if (maxChars <= 3) return text.substring(0, maxChars);
+  return text.substring(0, maxChars - 3) + "...";
+}
+
+static void tftCard(int16_t x, int16_t y, int16_t w, int16_t h, const char *title) {
+  lcd.fillRoundRect(x, y, w, h, 6, TFT_SURFACE);
+  lcd.drawRoundRect(x, y, w, h, 6, TFT_LINE);
+  lcd.setTextDatum(TL_DATUM);
+  lcd.setTextSize(1);
+  lcd.setTextColor(TFT_MUTED, TFT_SURFACE);
+  lcd.setCursor(x + 10, y + 8);
+  lcd.print(title);
+}
+
+static void tftCardLine(int16_t x, int16_t y, const String &text, uint16_t color = TFT_TEXT, uint16_t bg = TFT_SURFACE) {
+  lcd.setTextDatum(TL_DATUM);
+  lcd.setTextSize(1);
+  lcd.setTextColor(color, bg);
+  lcd.setCursor(x, y);
+  lcd.print(text);
+}
+
+static void tftValue(int16_t x, int16_t y, const String &label, const String &value, uint16_t color = TFT_TEXT) {
+  lcd.setTextDatum(TL_DATUM);
+  lcd.setTextSize(1);
+  lcd.setTextColor(TFT_MUTED, TFT_SURFACE);
+  lcd.setCursor(x, y);
+  lcd.print(label);
+  lcd.setTextColor(color, TFT_SURFACE);
+  lcd.setCursor(x, y + 16);
+  lcd.print(value);
+}
+
+static const char *tftRunStatusLabel() {
+  switch (tftRunStatus) {
+    case TFT_RUN_STARTING:  return "STARTING";
+    case TFT_RUN_COMPLETED: return "COMPLETED";
+    case TFT_RUN_STOPPED:   return "STOPPED";
+    case TFT_RUN_READY:
+    default:                return "READY";
+  }
+}
+
+static uint16_t tftRunStatusColor() {
+  switch (tftRunStatus) {
+    case TFT_RUN_STARTING:  return TFT_ACCENT_2;
+    case TFT_RUN_COMPLETED: return TFT_OK_COLOR;
+    case TFT_RUN_STOPPED:   return TFT_WARN_COLOR;
+    case TFT_RUN_READY:
+    default:                return TFT_OK_COLOR;
+  }
+}
+
+static String tftRunStatusDetail() {
+  switch (tftRunStatus) {
+    case TFT_RUN_STARTING:
+      return String("Starting ") + measurementModeToText(getMeasurementMode()) + " measurement";
+    case TFT_RUN_COMPLETED:
+      return String(measurementModeToText(getMeasurementMode())) + " finished; data available in web app";
+    case TFT_RUN_STOPPED:
+      return "Measurement stopped; GLCD and touch are active";
+    case TFT_RUN_READY:
+    default:
+      return "Ready for measurement";
+  }
+}
+
+static void drawRunStatusCard() {
+  tftCard(10, 266, 460, 34, "MEASUREMENT STATUS");
+  lcd.setTextDatum(TL_DATUM);
+  lcd.setTextSize(1);
+  lcd.setTextColor(tftRunStatusColor(), TFT_SURFACE);
+  lcd.setCursor(22, 288);
+  lcd.print(tftRunStatusLabel());
+  tftCardLine(104, 288, tftFitText(tftRunStatusDetail(), 48), TFT_TEXT);
+}
+
+static void showTftRunStatusImmediate() {
+  if (measurementSessionActive()) return;
+  if (spiMutex == nullptr) return;
+  if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(250)) != pdTRUE) return;
+
+  deselectAllSPI();
+  lcd.setRotation(1);
+  lcd.startWrite();
+  drawRunStatusCard();
+  lcd.endWrite();
+  deselectAllSPI();
+
+  xSemaphoreGive(spiMutex);
+}
+
 void drawFirmwareVersion() {
   // Must be called inside an active lcd.startWrite() block.
   String text = String("FW ") + FW_VERSION;
@@ -2356,8 +2476,8 @@ void drawFirmwareVersion() {
 
   lcd.setTextDatum(BR_DATUM);
   lcd.setTextSize(1);
-  lcd.setTextColor(0x7BEF, TFT_BLACK);
-  lcd.fillRect(lcd.width() - 100, lcd.height() - 18, 100, 18, TFT_BLACK);
+  lcd.setTextColor(TFT_MUTED, TFT_BG);
+  lcd.fillRect(lcd.width() - 100, lcd.height() - 18, 100, 18, TFT_BG);
   lcd.drawString(text, x, y);
   lcd.setTextDatum(TL_DATUM);
 }
@@ -2405,9 +2525,12 @@ void showOtaStatusScreen(const String &title, const String &line1, const String 
 }
 
 void printRtcTimeLine(const String &line) {
-  lcd.fillRect(10, 230, 260, 12, TFT_BLACK);
-  lcd.setCursor(10, 230);
-  lcd.println(line);
+  lcd.fillRect(257, 240, 200, 14, TFT_SURFACE);
+  lcd.setTextDatum(TL_DATUM);
+  lcd.setTextSize(1);
+  lcd.setTextColor(TFT_MUTED, TFT_SURFACE);
+  lcd.drawString(tftFitText(line, 31), 257, 240);
+  lcd.setTextDatum(TL_DATUM);
 }
 
 void drawRtcTimeLine() {
@@ -2436,34 +2559,23 @@ void drawStatusPanel() {
   lcd.setRotation(1);
   lcd.startWrite();
   lcd.setTextDatum(TL_DATUM);
-  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
 
-  lcd.setTextSize(1);
-  lcd.fillRect(10, 122, 460, 165, TFT_BLACK);
-  lcd.setCursor(10, 122);
-  lcd.println(text.wifiLine1);
-  if (text.wifiLine2.length() > 0) {
-    lcd.setCursor(10, 140);
-    lcd.println(text.wifiLine2);
-  }
-  if (text.wifiLine3.length() > 0) {
-    lcd.setCursor(10, 158);
-    lcd.println(text.wifiLine3);
-  }
+  lcd.fillRect(8, 76, 464, 236, TFT_BG);
 
-  lcd.setCursor(10, 194);
-  lcd.println(text.sdLine);
+  tftCard(10, 78, 460, 108, "NETWORK");
+  tftCardLine(22, 104, tftFitText(text.wifiLine1, 54));
+  tftCardLine(22, 122, text.wifiLine2, TFT_ACCENT_2);
+  tftCardLine(22, 140, tftFitText(text.wifiLine3, 54), TFT_MUTED);
 
-  lcd.setCursor(10, 212);
-  lcd.println(text.rtcLine);
+  tftCard(10, 196, 225, 64, "STORAGE");
+  tftCardLine(22, 222, tftFitText(text.sdLine, 31), sdMounted ? TFT_OK_COLOR : TFT_WARN_COLOR);
+  tftCardLine(22, 240, tftFitText(text.stateLine, 31), measurementEnabled ? TFT_WARN_COLOR : TFT_OK_COLOR);
 
-  printRtcTimeLine(text.rtcTimeLine);
+  tftCard(245, 196, 225, 64, "RTC");
+  tftCardLine(257, 222, tftFitText(text.rtcLine, 31), rtcUtcSynced ? TFT_OK_COLOR : TFT_WARN_COLOR);
+  tftCardLine(257, 240, tftFitText(text.rtcTimeLine, 31), TFT_MUTED);
 
-  lcd.setCursor(10, 248);
-  lcd.println(text.stateLine);
-
-  lcd.setCursor(10, 266);
-  lcd.println("Use web app for CV/SWV/DPV setup and files.");
+  drawRunStatusCard();
   drawFirmwareVersion();
 
   lcd.endWrite();
@@ -2476,27 +2588,24 @@ void drawStaticScreen() {
 
   lcd.setRotation(1);                 // Set rotation before clearing/drawing.
   lcd.startWrite();
-  lcd.fillScreen(TFT_BLACK);
+  lcd.fillScreen(TFT_BG);
   lcd.setTextDatum(TL_DATUM);
-  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
-  lcd.setTextSize(2);
-  lcd.setCursor(10, 10);
-  lcd.println("smart-ec");
 
+  lcd.fillRect(0, 0, lcd.width(), 68, TFT_SURFACE);
+  lcd.drawFastHLine(0, 68, lcd.width(), TFT_LINE);
+
+  lcd.fillRoundRect(12, 10, 318, 45, 6, TFT_SURFACE_2);
+  lcd.drawRoundRect(12, 10, 318, 45, 6, TFT_LINE);
   lcd.setTextSize(1);
-  lcd.setCursor(10, 42);
-  lcd.println("Potentiostat controller");
-  lcd.setCursor(10, 58);
-  lcd.println("GLCD/Touch disabled during measurement");
-
-  // Start/Stop button area
-  lcd.drawRect(BTN_X, BTN_Y, BTN_W, BTN_H, TFT_WHITE);
-
-  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  lcd.setTextColor(TFT_MUTED, TFT_SURFACE_2);
+  lcd.setCursor(24, 18);
+  lcd.print("MODE");
   lcd.setTextSize(2);
-  lcd.setCursor(10, 88);
-  lcd.print("Mode: ");
-  lcd.println(measurementModeToText(getMeasurementMode()));
+  lcd.setTextColor(TFT_TEXT, TFT_SURFACE_2);
+  lcd.setCursor(24, 32);
+  lcd.print(measurementModeToText(getMeasurementMode()));
+
+  lcd.drawRoundRect(BTN_X, BTN_Y, BTN_W, BTN_H, 6, TFT_LINE);
   drawFirmwareVersion();
 
   lcd.endWrite();
@@ -2512,7 +2621,7 @@ void drawRunButton(bool running) {
 
   if (!running && LittleFS.exists(RUN_LOGO_FILE)) {
     lcd.startWrite();
-    lcd.fillRect(BTN_X, BTN_Y, BTN_W, BTN_H, TFT_BLACK);
+    lcd.fillRoundRect(BTN_X, BTN_Y, BTN_W, BTN_H, 6, TFT_BG);
     lcd.endWrite();
 
     if (lcd.drawPngFile(LittleFS, RUN_LOGO_FILE, BTN_X, BTN_Y, BTN_W, BTN_H)) {
@@ -2522,9 +2631,10 @@ void drawRunButton(bool running) {
   }
 
   lcd.startWrite();
-  uint16_t bg = running ? TFT_RED : TFT_GREEN;
-  lcd.fillRect(BTN_X + 2, BTN_Y + 2, BTN_W - 4, BTN_H - 4, bg);
-  lcd.setTextColor(TFT_BLACK, bg);
+  uint16_t bg = running ? TFT_RED : TFT_OK_COLOR;
+  lcd.fillRoundRect(BTN_X, BTN_Y, BTN_W, BTN_H, 6, bg);
+  lcd.drawRoundRect(BTN_X, BTN_Y, BTN_W, BTN_H, 6, TFT_TEXT);
+  lcd.setTextColor(running ? TFT_WHITE : TFT_BLACK, bg);
   lcd.setTextSize(2);
   lcd.setTextDatum(MC_DATUM);
   lcd.drawString(running ? "STOP" : "RUN", BTN_X + BTN_W / 2, BTN_Y + BTN_H / 2);
@@ -2541,52 +2651,39 @@ void drawMeasurement(const MeasurementData &data) {
   lcd.setRotation(1);
   lcd.startWrite();
   lcd.setTextDatum(TL_DATUM);
-  lcd.setTextColor(TFT_CYAN, TFT_BLACK);
-  lcd.setTextSize(2);
 
-  lcd.fillRect(10, 80, 460, 280, TFT_BLACK);
+  lcd.fillRect(8, 76, 464, 236, TFT_BG);
 
-  lcd.setCursor(10, 80);
-  lcd.print("Mode: ");
-  lcd.println(measurementModeToText(data.mode));
-
-  lcd.setCursor(10, 110);
-  lcd.print("Dir: ");
-  lcd.println(directionToText(data.direction));
-
-  lcd.setCursor(10, 140);
-  lcd.print("DAC set: ");
-  lcd.print(data.dacSetVoltage, 3);
-  lcd.println(" V");
-
-  lcd.setCursor(10, 170);
-  lcd.print("DAC code: ");
-  lcd.println(data.dacCode);
-
-  lcd.setCursor(10, 200);
-  lcd.print("ADC raw: ");
-  lcd.println(data.adcRaw);
-
-  lcd.setCursor(10, 230);
-  lcd.print("ADC V: ");
-  lcd.print(data.adcVoltage, 6);
-  lcd.println(" V");
-
-  lcd.setCursor(10, 260);
-  lcd.print("RTIA: ");
-  lcd.print(data.rtiaOhm, 0);
-  lcd.print(" ohm ");
-  lcd.print(data.autoRangeAction);
-
-  lcd.setCursor(10, 290);
-  lcd.print("I: ");
-  lcd.print(data.currentAmp * 1000000.0f, 3);
-  lcd.println(" uA");
-
-  lcd.setCursor(10, 320);
-  lcd.print("Period: ");
+  tftCard(10, 78, 460, 48, "LATEST SAMPLE");
+  lcd.setTextSize(1);
+  lcd.setTextColor(TFT_ACCENT_2, TFT_SURFACE);
+  lcd.setCursor(22, 104);
+  lcd.print(measurementModeToText(data.mode));
+  lcd.setTextColor(TFT_MUTED, TFT_SURFACE);
+  lcd.setCursor(100, 104);
+  lcd.print(directionToText(data.direction));
+  lcd.setCursor(210, 104);
+  lcd.print("Period ");
+  lcd.setTextColor(TFT_TEXT, TFT_SURFACE);
   lcd.print(data.period_us);
-  lcd.println(" us");
+  lcd.print(" us");
+
+  tftCard(10, 136, 145, 62, "POTENTIAL");
+  tftValue(22, 160, "DAC set", String(data.dacSetVoltage, 3) + " V", TFT_ACCENT_2);
+
+  tftCard(168, 136, 145, 62, "ADC");
+  tftValue(180, 160, "Voltage", String(data.adcVoltage, 6) + " V", TFT_ACCENT_2);
+
+  tftCard(325, 136, 145, 62, "CURRENT");
+  tftValue(337, 160, "I", String(data.currentAmp * 1000000.0f, 3) + " uA", TFT_ACCENT_2);
+
+  tftCard(10, 208, 225, 40, "RANGE");
+  tftCardLine(22, 232, String("RTIA ") + String(data.rtiaOhm, 0) + " ohm  " + data.autoRangeAction);
+
+  tftCard(245, 208, 225, 40, "RAW");
+  tftCardLine(257, 232, String("ADC ") + String(data.adcRaw) + String("   DAC ") + String(data.dacCode));
+
+  drawRunStatusCard();
   drawFirmwareVersion();
 
   lcd.endWrite();
@@ -2731,6 +2828,10 @@ void manualRefreshDisplay() {
 void manualRefreshDisplay() {
   Serial.println("TFT disabled");
 }
+#endif
+
+#if !ENABLE_TFT_DISPLAY
+static void showTftRunStatusImmediate() {}
 #endif
 
 void refreshRunButtonFromOptionTask() {
