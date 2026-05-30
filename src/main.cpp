@@ -93,6 +93,7 @@ static const char *WEB_VERSION = "2.0.0";
 // Touch calibration storage
 #define CALIBRATION_FILE "/TouchCalData"
 #define RUN_LOGO_FILE "/run_logo.png"
+#define BRAND_LOGO_FILE "/brand_logo.png"
 
 // LMP91000 MENB
 // If MENB is not connected, use -1.
@@ -4997,6 +4998,23 @@ static void handlePlotlyJs() {
   wifiServer.send(404, "text/plain", "plotly.min.js not found");
 }
 
+static void handleBrandLogoPng() {
+  if (!LittleFS.exists(BRAND_LOGO_FILE)) {
+    wifiServer.send(404, "text/plain", "brand_logo.png not found");
+    return;
+  }
+
+  File f = LittleFS.open(BRAND_LOGO_FILE, FILE_READ);
+  if (!f) {
+    wifiServer.send(404, "text/plain", "brand_logo.png not found");
+    return;
+  }
+
+  wifiServer.sendHeader("Cache-Control", "public, max-age=86400");
+  wifiServer.streamFile(f, "image/png");
+  f.close();
+}
+
 static String sdAssetStatusJson() {
   String json = F("{\"sd_mounted\":");
   json += sdMounted ? F("true") : F("false");
@@ -5308,6 +5326,7 @@ static void startWifiWebServer() {
   wifiServer.on("/", HTTP_GET, []() { sendWifiPortalIndex(); });
   wifiServer.on("/wifi_index.html", HTTP_GET, []() { sendWifiPortalIndex(); });
   wifiServer.on("/plotly.min.js", HTTP_GET, []() { handlePlotlyJs(); });
+  wifiServer.on("/brand_logo.png", HTTP_GET, []() { handleBrandLogoPng(); });
   wifiServer.on("/generate_204", HTTP_GET, []() { wifiServer.sendHeader("Location", "/", true); wifiServer.send(302, "text/plain", ""); });
   wifiServer.on("/fwlink", HTTP_GET, []() { wifiServer.sendHeader("Location", "/", true); wifiServer.send(302, "text/plain", ""); });
 
