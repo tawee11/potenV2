@@ -92,6 +92,7 @@ static const char *WEB_VERSION = "2.0.0";
 
 // Touch calibration storage
 #define CALIBRATION_FILE "/TouchCalData"
+#define RUN_LOGO_FILE "/run_logo.png"
 
 // LMP91000 MENB
 // If MENB is not connected, use -1.
@@ -211,8 +212,8 @@ static const char *resetReasonToText(esp_reset_reason_t reason) {
 SPIClass spiBus(FSPI);   // ESP32-S3: FSPI usually maps to SPI2_HOST / SPI2_HOST in LovyanGFX
 
 // เริ่ม conservative ก่อน ถ้านิ่งแล้วค่อยเพิ่มความเร็ว
-SPISettings dacSPI(1000000, MSBFIRST, SPI_MODE1);  // AD5680: ถ้า DAC ไม่ถูกลอง SPI_MODE0
-SPISettings adcSPI(1000000, MSBFIRST, SPI_MODE0);  // AD7694: เริ่ม 1 MHz ก่อน
+SPISettings dacSPI(5000000, MSBFIRST, SPI_MODE1);  // AD5680: ถ้า DAC ไม่ถูกลอง SPI_MODE0
+SPISettings adcSPI(5000000, MSBFIRST, SPI_MODE0);  // AD7694: เริ่ม 5 MHz ก่อน
 
 void deselectAllSPI() {
 #if ENABLE_TFT_DISPLAY
@@ -239,11 +240,11 @@ public:
       auto cfg = _bus_instance.config();
       cfg.spi_host    = SPI2_HOST;
       cfg.spi_mode    = 0;
-      cfg.freq_write  = 10000000;       // Safer for shared SPI with TFT + Touch + DAC/ADC
+      cfg.freq_write  = 20000000;       // Fast config-screen refresh; measurement disables TFT/Touch
       cfg.freq_read   = 8000000;
       cfg.spi_3wire   = false;
       cfg.use_lock    = true;
-      cfg.dma_channel = 0;              // Disable DMA first; safer when several devices share SPI2_HOST
+      cfg.dma_channel = 1;              // Enable DMA for TFT drawing while outside measurement sessions
 
       cfg.pin_sclk = SPI_SCK;
       cfg.pin_mosi = SPI_MOSI;
@@ -2507,6 +2508,18 @@ void drawRunButton(bool running) {
   deselectAllSPI();
 
   lcd.setRotation(1);
+
+  if (!running && LittleFS.exists(RUN_LOGO_FILE)) {
+    lcd.startWrite();
+    lcd.fillRect(BTN_X, BTN_Y, BTN_W, BTN_H, TFT_BLACK);
+    lcd.endWrite();
+
+    if (lcd.drawPngFile(LittleFS, RUN_LOGO_FILE, BTN_X, BTN_Y, BTN_W, BTN_H)) {
+      deselectAllSPI();
+      return;
+    }
+  }
+
   lcd.startWrite();
   uint16_t bg = running ? TFT_RED : TFT_GREEN;
   lcd.fillRect(BTN_X + 2, BTN_Y + 2, BTN_W - 4, BTN_H - 4, bg);
