@@ -14,6 +14,7 @@
 #include <WiFiClientSecure.h>
 #include <Update.h>
 #include <time.h>
+#include <math.h>
 #include "esp_system.h"
 #if __has_include(<esp_wpa2.h>)
 #include <esp_wpa2.h>
@@ -362,6 +363,7 @@ static const UBaseType_t MEAS_PRIORITY_RUN  = 5;
 static const UBaseType_t OPTION_PRIORITY    = 2;
 static void resetMeasurementProgress(uint16_t totalCycles);
 static void showTftRunStatusImmediate();
+static void captureMeasurementTemperatureSnapshot();
 
 static QueueHandle_t loggerQueue = nullptr;
 static QueueHandle_t sdRecordQueue = nullptr;
@@ -444,6 +446,8 @@ void requestMeasurementRun() {
   // When idle, MeasurementTask is blocked in ulTaskNotifyTake() and uses no CPU time.
   tftRunStatus = TFT_RUN_STARTING;
   showTftRunStatusImmediate();
+
+  captureMeasurementTemperatureSnapshot();
 
   measurementStopRequested = false;
   resetMeasurementProgress(0);
@@ -632,6 +636,8 @@ struct CvBinHeader {
   uint16_t reserved;
   uint32_t quietMs;
   char experimentName[32];
+  float startTempC;
+  float startTempV;
 };
 
 struct CvBinRecord {
@@ -654,7 +660,8 @@ struct CvBinRecord {
   float rtiaOhm;
 };
 
-static_assert(sizeof(CvBinHeader) == 104, "Unexpected CV header size");
+static const uint16_t CV_BIN_HEADER_LEGACY_SIZE = 104;
+static_assert(sizeof(CvBinHeader) == 112, "Unexpected CV header size");
 static_assert(sizeof(CvBinRecord) == 56, "Unexpected CV record size");
 
 static CvBinHeader activeCvHeader;
@@ -668,6 +675,12 @@ volatile uint32_t sdWriteErrorCount = 0;
 volatile bool rtcAvailable = false;
 volatile bool rtcUtcSynced = false;
 static uint32_t lastNtpSyncAttemptMs = 0;
+volatile bool lmpTemperatureAvailable = false;
+volatile float lmpTemperatureC = 0.0f;
+volatile float lmpTemperatureV = 0.0f;
+volatile bool measurementStartTempAvailable = false;
+volatile float measurementStartTempC = NAN;
+volatile float measurementStartTempV = NAN;
 
 struct RtcDateTime {
   uint16_t year;
@@ -691,6 +704,7 @@ volatile bool hasLastMeasurement = false;
 volatile bool tftFullRefreshRequested = false;
 volatile bool tftStatusRefreshRequested = false;
 volatile bool tftTimeRefreshRequested = false;
+volatile bool tftTempRefreshRequested = false;
 volatile bool tftRunButtonRefreshRequested = false;
 volatile bool tftDrawMeasurementRequested = false;
 
@@ -802,6 +816,10 @@ void requestTftStatusRefresh() {
 
 void requestTftTimeRefresh() {
   tftTimeRefreshRequested = true;
+}
+
+void requestTftTempRefresh() {
+  tftTempRefreshRequested = true;
 }
 
 void requestTftRunButtonRefresh() {
@@ -1377,6 +1395,11 @@ void fillCurrentFields(MeasurementData &data) {
   data.currentAmp = data.adcDeltaVoltage / data.rtiaOhm;
 }
 
+static void fillStartTemperatureMetadata(CvBinHeader &header) {
+  header.startTempC = measurementStartTempAvailable ? measurementStartTempC : NAN;
+  header.startTempV = measurementStartTempAvailable ? measurementStartTempV : NAN;
+}
+
 static void makeCvHeader(CvBinHeader &header, const CvConfig &cfg, uint64_t startedUs) {
   memset(&header, 0, sizeof(header));
   memcpy(header.magic, "POTCVB1", 7);
@@ -1396,6 +1419,7 @@ static void makeCvHeader(CvBinHeader &header, const CvConfig &cfg, uint64_t star
   header.cycles = cfg.cycles;
   header.quietMs = cfg.quietMs;
   strncpy(header.experimentName, cfg.experimentName, sizeof(header.experimentName) - 1);
+  fillStartTemperatureMetadata(header);
 }
 
 static void makeSwvHeader(CvBinHeader &header, const SwvConfig &cfg, uint64_t startedUs) {
@@ -1423,6 +1447,7 @@ static void makeSwvHeader(CvBinHeader &header, const SwvConfig &cfg, uint64_t st
   header.cycles = 1;
   header.quietMs = cfg.quietMs;
   strncpy(header.experimentName, cfg.experimentName, sizeof(header.experimentName) - 1);
+  fillStartTemperatureMetadata(header);
 }
 
 static void makeDpvHeader(CvBinHeader &header, const DpvConfig &cfg, uint64_t startedUs) {
@@ -1444,6 +1469,7 @@ static void makeDpvHeader(CvBinHeader &header, const DpvConfig &cfg, uint64_t st
   header.cycles = 1;
   header.quietMs = cfg.quietMs;
   strncpy(header.experimentName, cfg.experimentName, sizeof(header.experimentName) - 1);
+  fillStartTemperatureMetadata(header);
 }
 
 static void sanitizeExperimentName(const String &input, char *output, size_t outputSize) {
@@ -2453,6 +2479,21 @@ static void drawRunStatusCard() {
   tftCardLine(104, 288, tftFitText(tftRunStatusDetail(), 48), TFT_TEXT);
 }
 
+static void drawTempValueOnly() {
+  // Must be called inside an active lcd.startWrite() block.
+  lcd.fillRect(236, 34, 78, 16, TFT_SURFACE_2);
+  lcd.setTextDatum(TL_DATUM);
+  lcd.setTextSize(1);
+  lcd.setTextColor(TFT_TEXT, TFT_SURFACE_2);
+  lcd.setCursor(236, 34);
+  if (lmpTemperatureAvailable) {
+    lcd.print(lmpTemperatureC, 1);
+    lcd.print(" C");
+  } else {
+    lcd.print("--.- C");
+  }
+}
+
 static void showTftRunStatusImmediate() {
   if (measurementSessionActive()) return;
   if (spiMutex == nullptr) return;
@@ -2604,6 +2645,11 @@ void drawStaticScreen() {
   lcd.setTextColor(TFT_TEXT, TFT_SURFACE_2);
   lcd.setCursor(24, 32);
   lcd.print(measurementModeToText(getMeasurementMode()));
+  lcd.setTextSize(1);
+  lcd.setTextColor(TFT_MUTED, TFT_SURFACE_2);
+  lcd.setCursor(236, 18);
+  lcd.print("TEMP");
+  drawTempValueOnly();
 
   lcd.drawRoundRect(BTN_X, BTN_Y, BTN_W, BTN_H, 6, TFT_LINE);
   drawFirmwareVersion();
@@ -2699,10 +2745,11 @@ void serviceTftRefresh() {
   bool doFull = tftFullRefreshRequested;
   bool doStatus = tftStatusRefreshRequested;
   bool doTime = tftTimeRefreshRequested;
+  bool doTemp = tftTempRefreshRequested;
   bool doRun  = tftRunButtonRefreshRequested;
   bool doMeas = tftDrawMeasurementRequested && hasLastMeasurement;
 
-  if (!doFull && !doStatus && !doTime && !doRun && !doMeas) return;
+  if (!doFull && !doStatus && !doTime && !doTemp && !doRun && !doMeas) return;
 
   if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
     return;
@@ -2712,6 +2759,7 @@ void serviceTftRefresh() {
   tftFullRefreshRequested = false;
   tftStatusRefreshRequested = false;
   tftTimeRefreshRequested = false;
+  tftTempRefreshRequested = false;
   tftRunButtonRefreshRequested = false;
   tftDrawMeasurementRequested = false;
 
@@ -2723,6 +2771,13 @@ void serviceTftRefresh() {
     drawStatusPanel();
   } else if (doTime) {
     drawRtcTimeLine();
+  }
+
+  if (doTemp && !doFull && !doStatus && !doMeas) {
+    lcd.setRotation(1);
+    lcd.startWrite();
+    drawTempValueOnly();
+    lcd.endWrite();
   }
 
   if (doRun || doFull) {
@@ -2807,6 +2862,61 @@ void setLMPRegisterOption(uint8_t reg, uint8_t value) {
   Serial.print(value, HEX);
   Serial.print(" result=");
   Serial.println((okUnlock && okWrite && okLock) ? "OK" : "FAIL");
+}
+
+static float lmpTempVoltageToC(float voltage) {
+  // LMP91000 temperature sensor transfer is close to 1560 mV at 0 C
+  // with about -8.05 mV/C over the common operating range.
+  return (1.560f - voltage) / 0.00805f;
+}
+
+static bool updateLmpTemperatureIdle() {
+  if (measurementSessionActive()) return false;
+  if (!waitMeasurementIdle(50)) return false;
+
+  uint8_t previousMode = lmpReadReg_safe(REG_MODECN);
+  bool okUnlock = lmpWriteReg_safe(REG_LOCK, 0x00);
+  bool okTemp = lmpWriteReg_safe(REG_MODECN, 0x07);
+  bool okLockTemp = lmpWriteReg_safe(REG_LOCK, 0x01);
+  if (!(okUnlock && okTemp && okLockTemp)) {
+    lmpWriteReg_safe(REG_LOCK, 0x00);
+    lmpWriteReg_safe(REG_MODECN, previousMode);
+    lmpWriteReg_safe(REG_LOCK, 0x01);
+    return false;
+  }
+
+  vTaskDelay(pdMS_TO_TICKS(20));
+  if (measurementSessionActive()) {
+    lmpWriteReg_safe(REG_LOCK, 0x00);
+    lmpWriteReg_safe(REG_MODECN, previousMode);
+    lmpWriteReg_safe(REG_LOCK, 0x01);
+    return false;
+  }
+
+  uint16_t raw = readAD7694Average_safe(ADC_AVG_SAMPLES);
+  float voltage = adcRawToVoltage(raw);
+  float tempC = lmpTempVoltageToC(voltage);
+
+  lmpWriteReg_safe(REG_LOCK, 0x00);
+  lmpWriteReg_safe(REG_MODECN, previousMode);
+  lmpWriteReg_safe(REG_LOCK, 0x01);
+
+  lmpTemperatureV = voltage;
+  lmpTemperatureC = tempC;
+  lmpTemperatureAvailable = true;
+  return true;
+}
+
+static void captureMeasurementTemperatureSnapshot() {
+  // Take one temperature sample before the measurement task is allowed to run.
+  // During measurement we only use this cached value, so ADC/DAC timing stays first.
+  if (!measurementSessionActive()) {
+    updateLmpTemperatureIdle();
+  }
+
+  measurementStartTempAvailable = lmpTemperatureAvailable;
+  measurementStartTempC = measurementStartTempAvailable ? lmpTemperatureC : NAN;
+  measurementStartTempV = measurementStartTempAvailable ? lmpTemperatureV : NAN;
 }
 
 #if ENABLE_TFT_DISPLAY
@@ -4507,6 +4617,12 @@ static String measurementStatusJson() {
   json += String(measurementCycleTotal);
   json += F(",\"progress_percent\":");
   json += String((float)measurementProgressPermille * 0.1f, 1);
+  json += F(",\"lmp_temp_available\":");
+  json += lmpTemperatureAvailable ? F("true") : F("false");
+  json += F(",\"lmp_temp_c\":");
+  json += String(lmpTemperatureC, 2);
+  json += F(",\"lmp_temp_v\":");
+  json += String(lmpTemperatureV, 4);
   json += F(",\"mode\":\"");
   json += measurementModeToText(getMeasurementMode());
   json += F("\",\"modes\":[\"SWEEP\",\"HOLD_CENTER\",\"CV\",\"SWV\",\"DPV\"]");
@@ -4887,6 +5003,35 @@ static void handleCvFilesApi() {
   wifiServer.send(200, "application/json", cvFilesJson());
 }
 
+static bool readMeasurementBinHeader(File &file, CvBinHeader &header) {
+  memset(&header, 0, sizeof(header));
+
+  if (file.read((uint8_t *)&header, CV_BIN_HEADER_LEGACY_SIZE) != CV_BIN_HEADER_LEGACY_SIZE) return false;
+  if (memcmp(header.magic, "POTCVB1", 7) != 0 &&
+      memcmp(header.magic, "POTSWV1", 7) != 0 &&
+      memcmp(header.magic, "POTDPV1", 7) != 0) {
+    return false;
+  }
+  if (header.headerSize != CV_BIN_HEADER_LEGACY_SIZE && header.headerSize != sizeof(CvBinHeader)) return false;
+  if (header.recordSize != sizeof(CvBinRecord)) return false;
+
+  if (header.headerSize > CV_BIN_HEADER_LEGACY_SIZE) {
+    size_t extraSize = header.headerSize - CV_BIN_HEADER_LEGACY_SIZE;
+    uint8_t *extra = ((uint8_t *)&header) + CV_BIN_HEADER_LEGACY_SIZE;
+    if (file.read(extra, extraSize) != extraSize) return false;
+  } else {
+    header.startTempC = NAN;
+    header.startTempV = NAN;
+  }
+
+  return file.seek(header.headerSize);
+}
+
+static String csvFloatOrBlank(float value, uint8_t digits) {
+  if (isnan(value)) return String("");
+  return String(value, (unsigned int)digits);
+}
+
 static void handleCvDownloadCsvApi() {
 #if ENABLE_SD_LOGGING
   if (measurementEnabled || measurementBusy || cvLogActive || sdLogFileOpen) {
@@ -4914,9 +5059,7 @@ static void handleCvDownloadCsvApi() {
   }
 
   CvBinHeader header;
-  if (file.read((uint8_t *)&header, sizeof(header)) != sizeof(header) ||
-      (memcmp(header.magic, "POTCVB1", 7) != 0 && memcmp(header.magic, "POTSWV1", 7) != 0 && memcmp(header.magic, "POTDPV1", 7) != 0) ||
-      header.recordSize != sizeof(CvBinRecord)) {
+  if (!readMeasurementBinHeader(file, header)) {
     file.close();
     wifiServer.send(400, "application/json", F("{\"ok\":false,\"message\":\"Invalid CV binary file\"}"));
     return;
@@ -4931,8 +5074,9 @@ static void handleCvDownloadCsvApi() {
   String modeName = F("CV");
   if (memcmp(header.magic, "POTDPV1", 7) == 0) {
     modeName = F("DPV");
-    wifiServer.sendContent(F("mode,experiment_name,start_v,end_v,step_v,amplitude_v,period_ms,pulse_ms,quiet_ms\n"));
+    wifiServer.sendContent(F("mode,experiment_name,temp_c,start_v,end_v,step_v,amplitude_v,period_ms,pulse_ms,quiet_ms\n"));
     wifiServer.sendContent(modeName + "," + String(header.experimentName) + "," +
+                           csvFloatOrBlank(header.startTempC, 2) + "," +
                            String(header.startV, 6) + "," +
                            String(header.vertex1V, 6) + "," +
                            String(header.stepV, 6) + "," +
@@ -4944,8 +5088,9 @@ static void handleCvDownloadCsvApi() {
     modeName = F("SWV");
     float periodMs = 1000.0f / header.scanRateVps;
     float dutyMs = periodMs * header.finalV * 0.01f;
-    wifiServer.sendContent(F("mode,experiment_name,start_v,end_v,step_v,amplitude_v,frequency_hz,period_ms,duty_ms,duty_percent,quiet_ms\n"));
+    wifiServer.sendContent(F("mode,experiment_name,temp_c,start_v,end_v,step_v,amplitude_v,frequency_hz,period_ms,duty_ms,duty_percent,quiet_ms\n"));
     wifiServer.sendContent(modeName + "," + String(header.experimentName) + "," +
+                           csvFloatOrBlank(header.startTempC, 2) + "," +
                            String(header.startV, 6) + "," +
                            String(header.vertex1V, 6) + "," +
                            String(header.stepV, 6) + "," +
@@ -4956,8 +5101,9 @@ static void handleCvDownloadCsvApi() {
                            String(header.finalV, 6) + "," +
                            String(header.quietMs) + "\n\n");
   } else {
-    wifiServer.sendContent(F("mode,experiment_name,start_v,vertex1_v,vertex2_v,final_v,step_v,scan_rate_vps,cycles,quiet_ms\n"));
+    wifiServer.sendContent(F("mode,experiment_name,temp_c,start_v,vertex1_v,vertex2_v,final_v,step_v,scan_rate_vps,cycles,quiet_ms\n"));
     wifiServer.sendContent(modeName + "," + String(header.experimentName) + "," +
+                           csvFloatOrBlank(header.startTempC, 2) + "," +
                            String(header.startV, 6) + "," +
                            String(header.vertex1V, 6) + "," + String(header.vertex2V, 6) + "," +
                            String(header.finalV, 6) + "," + String(header.stepV, 6) + "," +
@@ -5780,6 +5926,7 @@ void optionTask(void *pvParameters) {
 
   MeasurementData data;
   uint32_t lastI2CStatusMs = 0;
+  uint32_t lastLmpTempMs = 0;
 
   wifiManagerBeginFromOptionTask();
   requestTftFullRefresh();
@@ -5823,6 +5970,14 @@ void optionTask(void *pvParameters) {
       (void)status;
     }
 #endif
+
+    uint32_t tempNowMs = millis();
+    if (!measurementSessionActive() && (tempNowMs - lastLmpTempMs >= 10000)) {
+      lastLmpTempMs = tempNowMs;
+      if (updateLmpTemperatureIdle()) {
+        requestTftTempRefresh();
+      }
+    }
 
 #if ENABLE_TFT_DISPLAY
     requestTftPeriodicIdleRefresh();
@@ -5872,6 +6027,7 @@ void vibrationPulse(uint8_t duty, uint32_t durationMs) {
 // Setup
 // ======================================================
 void setup() {
+  delay(100);
   Serial.begin(115200);
   delay(1000);
 
@@ -5887,7 +6043,7 @@ void setup() {
   digitalWrite(LED_BUILTIN_PIN, LOW);
 
   vibrationBegin();
-  vibrationPulse(30, 300); 
+
   
   // ------------------------------
   // FreeRTOS objects first
@@ -6070,7 +6226,7 @@ void setup() {
     &optionTaskHandle,
     0
   );
-
+  vibrationPulse(30, 300); 
   Serial.println("Tasks created. Ready.");
 }
 
